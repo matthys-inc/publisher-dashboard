@@ -1,6 +1,0 @@
-{
-  "name": "Publishing Dashboard",
-  "description": "Een minimalistisch en responsive dashboard om geplande content te analyseren, te publiceren op websites en socials, en prestaties overzichtelijk te visualiseren.",
-  "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
-}

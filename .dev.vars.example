@@ -1,0 +1,4 @@
+# Wrangler leest .dev.vars in voor `wrangler pages dev`.
+# Kopieer naar .dev.vars (niet in git) en vul jouw key in.
+
+GEMINI_API_KEY=

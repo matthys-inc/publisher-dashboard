@@ -6,3 +6,7 @@ coverage/
 *.log
 .env*
 !.env.example
+.dev.vars
+!.dev.vars.example
+.wrangler/
+data_store.json

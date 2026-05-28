@@ -1,0 +1,10 @@
+name = "publisher-dashboard"
+compatibility_date = "2025-01-15"
+compatibility_flags = ["nodejs_compat"]
+pages_build_output_dir = "dist"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "publisher-dashboard-db"
+database_id = "REPLACE_AFTER_RUNNING_npm_run_db:create"
+migrations_dir = "migrations"
