@@ -1,0 +1,104 @@
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --color-slate-950: #0a0a0a;
+  --color-slate-900: #121212;
+  --color-slate-850: #151515;
+  --color-slate-800: rgba(255, 255, 255, 0.1);
+  --color-slate-700: rgba(255, 255, 255, 0.15);
+  --color-slate-650: rgba(255, 255, 255, 0.05);
+  
+  --font-sans: "Inter", system-ui, -apple-system, sans-serif;
+  --font-display: "Space Grotesk", sans-serif;
+  --font-mono: "JetBrains Mono", monospace;
+
+  --color-emerald-550: #10b981;
+  --color-emerald-500: #10b981;
+  --color-emerald-400: #34d399;
+  
+  /* Map standard styling utilities perfectly of the indigo component structure to beautiful glows */
+  --color-indigo-600: #10b981;
+  --color-indigo-750: #059669;
+  --color-indigo-700: #059669;
+  --color-indigo-800: #047857;
+  --color-indigo-505: #10b981;
+  --color-indigo-550: #10b981;
+  --color-indigo-50: rgba(16, 185, 129, 0.08);
+  --color-indigo-100: rgba(16, 185, 129, 0.15);
+  --color-indigo-200: rgba(16, 185, 129, 0.25);
+  --color-indigo-950: rgba(16, 185, 129, 0.1);
+  --color-indigo-900: rgba(16, 185, 129, 0.15);
+}
+
+@layer base {
+  body {
+    background-color: #0a0a0a;
+    color: #f3f4f6;
+    font-family: var(--font-sans);
+  }
+
+  /* Smooth light-mode matching using clean crisp modern panels */
+  html:not(.dark) body {
+    background-color: #f4f5f6;
+    color: #111827;
+  }
+}
+
+/* Beautiful custom CSS classes for Bento cards */
+.bento-grid-layout {
+  display: grid;
+  gap: 1.25rem;
+}
+
+.bento-card {
+  background-color: #151515;
+  border: 1px solid rgba(255, 255, 255, 0.08); /* border-white/10 equivalent */
+  border-radius: 1rem; /* rounded-2xl */
+  padding: 1.5rem;
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+html:not(.dark) .bento-card {
+  background-color: #ffffff;
+  border: 1px solid rgba(0, 0, 0, 0.06);
+}
+
+.bento-card:hover {
+  border-color: rgba(255, 255, 255, 0.15);
+  transform: translateY(-1px);
+}
+
+html:not(.dark) .bento-card:hover {
+  border-color: rgba(0, 0, 0, 0.12);
+}
+
+/* Glow highlights */
+.bento-glow-emerald {
+  box-shadow: 0 0 20px rgba(16, 185, 129, 0.08);
+}
+
+.bento-glow-blue {
+  box-shadow: 0 0 20px rgba(59, 130, 246, 0.08);
+}
+
+/* Animations and transitions */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.animate-fadeIn {
+  animation: fadeIn 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+/* Recharts override labels colors dynamically */
+.recharts-cartesian-grid-horizontal line,
+.recharts-cartesian-grid-vertical line {
+  stroke: rgba(255, 255, 255, 0.05) !important;
+}
+
+html:not(.dark) .recharts-cartesian-grid-horizontal line,
+html:not(.dark) .recharts-cartesian-grid-vertical line {
+  stroke: rgba(0, 0, 0, 0.05) !important;
+}
