@@ -1,11 +1,41 @@
 import { Hono } from "hono";
 import { handle } from "hono/cloudflare-pages";
+import { getCookie, setCookie, deleteCookie } from "hono/cookie";
 import { GoogleGenAI } from "@google/genai";
 
 type Env = {
   DB: D1Database;
   GEMINI_API_KEY?: string;
+  // Google OAuth (zie OAUTH_SETUP.md). Server-side secrets, nooit in de bundle.
+  GOOGLE_CLIENT_ID?: string;
+  GOOGLE_CLIENT_SECRET?: string;
+  // Vast basis-domein voor OAuth redirects, bv. https://publisher-dashboard.pages.dev
+  // (geen per-deploy hash-subdomein gebruiken). Valt terug op de request-origin.
+  APP_BASE_URL?: string;
 };
+
+// Google OAuth constanten
+const GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth";
+const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
+const GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v2/userinfo";
+const GOOGLE_OAUTH_SCOPES = [
+  "openid",
+  "email",
+  "https://www.googleapis.com/auth/analytics.readonly",
+  "https://www.googleapis.com/auth/webmasters.readonly",
+].join(" ");
+const OAUTH_STATE_COOKIE = "g_oauth_state";
+
+// Bepaalt het basis-domein voor de redirect_uri. Voorkeur: APP_BASE_URL env-var,
+// anders de origin van het inkomende request.
+const getBaseUrl = (c: { env: Env; req: { url: string } }) => {
+  const configured = c.env.APP_BASE_URL?.trim().replace(/\/+$/, "");
+  if (configured) return configured;
+  return new URL(c.req.url).origin;
+};
+
+const escapeHtml = (s: string) =>
+  s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
 type Variables = {};
 
@@ -82,11 +112,16 @@ const readSettings = async (db: D1Database) => {
     .prepare(
       `SELECT google_analytics_connected, google_analytics_property_id,
               search_console_connected, search_console_site_url,
-              linkedin_connected, twitter_connected, wordpress_connected
+              linkedin_connected, twitter_connected, wordpress_connected,
+              google_refresh_token, google_email
        FROM settings WHERE id = 1`
     )
     .first<Record<string, number | string>>();
+  const googleConnected = !!(row?.google_refresh_token as string);
   return {
+    // googleConnected = er is een geldige OAuth-koppeling (refresh token aanwezig).
+    googleConnected,
+    googleEmail: (row?.google_email as string) || "",
     googleAnalyticsConnected: !!row?.google_analytics_connected,
     googleAnalyticsPropertyId: (row?.google_analytics_property_id as string) || "",
     searchConsoleConnected: !!row?.search_console_connected,
@@ -94,6 +129,22 @@ const readSettings = async (db: D1Database) => {
     linkedinConnected: !!row?.linkedin_connected,
     twitterConnected: !!row?.twitter_connected,
     wordpressConnected: !!row?.wordpress_connected,
+  };
+};
+
+// Volledige (interne) tokenstatus - bevat secrets, nooit naar de client sturen.
+const readGoogleTokens = async (db: D1Database) => {
+  const row = await db
+    .prepare(
+      `SELECT google_access_token, google_refresh_token, google_token_expiry, google_email
+       FROM settings WHERE id = 1`
+    )
+    .first<Record<string, number | string>>();
+  return {
+    accessToken: (row?.google_access_token as string) || "",
+    refreshToken: (row?.google_refresh_token as string) || "",
+    expiry: Number(row?.google_token_expiry || 0),
+    email: (row?.google_email as string) || "",
   };
 };
 
@@ -130,6 +181,26 @@ app.post("/api/websites", async (c) => {
   return c.json({ id, name: body.name, url: body.url, cms: body.cms ?? "custom", connected: !!body.connected });
 });
 
+app.delete("/api/websites/:id", async (c) => {
+  const id = c.req.param("id");
+
+  const existing = await c.env.DB.prepare(`SELECT id FROM websites WHERE id = ?`).bind(id).first();
+  if (!existing) return c.json({ error: "Website not found" }, 404);
+
+  // Tel hoeveel geplande/gepubliceerde posts nog naar deze site verwijzen.
+  // We blokkeren niet, maar geven het aantal terug zodat de UI kan waarschuwen.
+  const postsRes = await c.env.DB.prepare(`SELECT target_websites FROM posts`).all<{ target_websites: string }>();
+  let affectedPosts = 0;
+  for (const p of postsRes.results ?? []) {
+    const targets = parseJsonArray(p.target_websites) as string[];
+    if (targets.includes(id)) affectedPosts++;
+  }
+
+  await c.env.DB.prepare(`DELETE FROM websites WHERE id = ?`).bind(id).run();
+
+  return c.json({ success: true, affectedPosts });
+});
+
 app.post("/api/credentials", async (c) => {
   const body = await c.req.json<Record<string, unknown>>();
   const current = await readSettings(c.env.DB);
@@ -137,6 +208,11 @@ app.post("/api/credentials", async (c) => {
 
   const gaPropId = String(merged.googleAnalyticsPropertyId ?? "");
   const gscUrl = String(merged.searchConsoleSiteUrl ?? "");
+
+  // Bij een echte OAuth-koppeling blijft de status "connected", ook als de
+  // gebruiker (nog) geen property id / site url heeft ingevuld.
+  const gaConnected = current.googleConnected || !!gaPropId;
+  const gscConnected = current.googleConnected || !!gscUrl;
 
   await c.env.DB.prepare(
     `UPDATE settings SET
@@ -150,9 +226,9 @@ app.post("/api/credentials", async (c) => {
      WHERE id = 1`
   )
     .bind(
-      gaPropId ? 1 : 0,
+      gaConnected ? 1 : 0,
       gaPropId,
-      gscUrl ? 1 : 0,
+      gscConnected ? 1 : 0,
       gscUrl,
       merged.linkedinConnected ? 1 : 0,
       merged.twitterConnected ? 1 : 0,
@@ -287,103 +363,228 @@ app.post("/api/posts/:id/publish", async (c) => {
   return c.json({ success: true, post: updated ? postToApi(updated) : null });
 });
 
-app.post("/api/auth/sso-complete", async (c) => {
-  const body = await c.req.json<{ gaPropertyId?: string; gscSiteUrl?: string; selectedSocials?: string[] }>();
-  const gaPropId = body.gaPropertyId || "GA4-94827150";
-  const gscUrl = body.gscSiteUrl || "https://techinzichten.nl";
-  const selected = body.selectedSocials ?? [];
+// ---------- Google OAuth (echte koppeling) ----------
 
-  await c.env.DB.prepare(
-    `UPDATE settings SET
-       google_analytics_property_id = ?,
-       google_analytics_connected = 1,
-       search_console_site_url = ?,
-       search_console_connected = 1
-     WHERE id = 1`
-  )
-    .bind(gaPropId, gscUrl)
-    .run();
-
-  const allSocials = await c.env.DB.prepare(`SELECT * FROM socials`).all<SocialRow>();
-  for (const s of allSocials.results ?? []) {
-    const isSelected = selected.includes(s.id);
-    const newHandle = isSelected && s.handle === "Niet Gekoppeld" ? `@${s.id}_sso` : s.handle;
-    await c.env.DB.prepare(`UPDATE socials SET connected = ?, handle = ? WHERE id = ?`)
-      .bind(isSelected ? 1 : 0, newHandle, s.id)
-      .run();
-  }
-
-  const [credentials, socials] = await Promise.all([
-    readSettings(c.env.DB),
-    c.env.DB.prepare(`SELECT * FROM socials ORDER BY id ASC`).all<SocialRow>(),
-  ]);
-
-  return c.json({
-    success: true,
-    credentials,
-    socials: (socials.results ?? []).map(socialToApi),
-  });
-});
-
-app.get("/auth/sso", (c) => {
-  return c.html(`<!DOCTYPE html>
+// Klein HTML-paginaatje voor de popup. Sluit zichzelf en seint het hoofdvenster
+// in via postMessage (same-origin, dus targetOrigin = eigen origin).
+const oauthResultPage = (opts: {
+  baseUrl: string;
+  ok: boolean;
+  title: string;
+  message: string;
+}) => `<!DOCTYPE html>
 <html lang="nl">
 <head>
   <meta charset="UTF-8">
-  <title>Single Sign-On (SSO)</title>
-  <script src="https://cdn.tailwindcss.com"></script>
-  <style>body { background-color: #0f172a; color: #f1f5f9; font-family: system-ui, -apple-system, sans-serif; }</style>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>${escapeHtml(opts.title)}</title>
+  <style>
+    body { background:#0f172a; color:#f1f5f9; font-family: system-ui, -apple-system, sans-serif; display:flex; align-items:center; justify-content:center; min-height:100vh; margin:0; padding:1rem; }
+    .card { max-width:420px; width:100%; background:#1e293b; border:1px solid #334155; border-radius:1rem; padding:1.75rem; box-shadow:0 10px 40px rgba(0,0,0,.4); }
+    h2 { font-size:1rem; margin:0 0 .5rem; }
+    p { font-size:.8rem; color:#94a3b8; line-height:1.5; margin:.25rem 0; }
+    .ok { color:#34d399; } .err { color:#f87171; }
+    button { margin-top:1.25rem; width:100%; padding:.6rem; border:none; border-radius:.6rem; background:#334155; color:#e2e8f0; font-size:.8rem; font-weight:600; cursor:pointer; }
+  </style>
 </head>
-<body class="flex items-center justify-center min-h-screen p-4">
-  <div class="w-full max-w-md bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-2xl space-y-6">
-    <div class="text-center space-y-2">
-      <h2 class="text-lg font-bold">Machtigingsportaal (SSO)</h2>
-      <p class="text-xs text-slate-400">Verleen toegang tot GA4, Search Console en sociale media.</p>
-    </div>
-    <div class="space-y-3">
-      <input id="property-id" value="GA4-94827150" class="w-full bg-slate-950 border border-slate-800 rounded px-2 py-1 text-xs font-mono" placeholder="GA4 Property ID" />
-      <input id="site-url" value="https://techinzichten.nl" class="w-full bg-slate-950 border border-slate-800 rounded px-2 py-1 text-xs font-mono" placeholder="Search Console site URL" />
-      <div class="grid grid-cols-2 gap-2 text-xs">
-        <label class="flex items-center gap-2"><input type="checkbox" class="social-chk" value="linkedin" checked /> LinkedIn</label>
-        <label class="flex items-center gap-2"><input type="checkbox" class="social-chk" value="twitter" checked /> Twitter / X</label>
-        <label class="flex items-center gap-2"><input type="checkbox" class="social-chk" value="facebook" /> Facebook</label>
-        <label class="flex items-center gap-2"><input type="checkbox" class="social-chk" value="instagram" /> Instagram</label>
-      </div>
-    </div>
-    <div class="flex justify-end gap-3 pt-4 border-t border-slate-800">
-      <button onclick="window.close()" class="px-4 py-2 rounded-lg text-xs font-semibold text-slate-400 hover:text-white">Annuleer</button>
-      <button id="authorize-btn" onclick="confirmSSO()" class="px-4 py-2 rounded-lg bg-emerald-500 hover:bg-emerald-600 text-xs font-bold">Machtiging Verlenen</button>
-    </div>
+<body>
+  <div class="card">
+    <h2 class="${opts.ok ? "ok" : "err"}">${escapeHtml(opts.title)}</h2>
+    <p>${escapeHtml(opts.message)}</p>
+    <button onclick="closeNow()">Venster sluiten</button>
   </div>
   <script>
-    async function confirmSSO() {
-      const btn = document.getElementById('authorize-btn');
-      btn.disabled = true;
-      btn.innerText = 'Verifiëren...';
-      const gaPropertyId = document.getElementById('property-id').value;
-      const gscSiteUrl = document.getElementById('site-url').value;
-      const selectedSocials = Array.from(document.querySelectorAll('.social-chk:checked')).map(el => el.value);
+    var TARGET = ${JSON.stringify(opts.baseUrl)};
+    var OK = ${opts.ok ? "true" : "false"};
+    function notifyAndClose() {
       try {
-        const res = await fetch('/api/auth/sso-complete', {
-          method: 'POST', headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({ gaPropertyId, gscSiteUrl, selectedSocials })
-        });
-        const data = await res.json();
-        if (data.success) {
-          if (window.opener) window.opener.postMessage({ type: 'OAUTH_AUTH_SUCCESS' }, '*');
-          window.close();
-        } else {
-          alert('Koppeling SSO mislukt.');
-          btn.disabled = false; btn.innerText = 'Machtiging Verlenen';
+        if (window.opener && OK) {
+          window.opener.postMessage({ type: 'OAUTH_AUTH_SUCCESS', provider: 'google' }, TARGET);
         }
-      } catch (e) {
-        alert('Fout bij SSO verwerking.');
-        btn.disabled = false; btn.innerText = 'Machtiging Verlenen';
-      }
+      } catch (e) {}
     }
+    function closeNow() { notifyAndClose(); window.close(); }
+    if (OK) { notifyAndClose(); setTimeout(function(){ window.close(); }, 1200); }
   </script>
 </body>
-</html>`);
+</html>`;
+
+// Instructiepagina wanneer de OAuth-secrets nog niet zijn ingesteld.
+const oauthSetupNeededPage = (redirectUri: string) => `<!DOCTYPE html>
+<html lang="nl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Google-koppeling nog niet geconfigureerd</title>
+  <style>
+    body { background:#0f172a; color:#f1f5f9; font-family: system-ui, -apple-system, sans-serif; display:flex; align-items:center; justify-content:center; min-height:100vh; margin:0; padding:1rem; }
+    .card { max-width:460px; width:100%; background:#1e293b; border:1px solid #334155; border-radius:1rem; padding:1.75rem; box-shadow:0 10px 40px rgba(0,0,0,.4); }
+    h2 { font-size:1rem; margin:0 0 .5rem; color:#fbbf24; }
+    p { font-size:.8rem; color:#94a3b8; line-height:1.55; }
+    ol { font-size:.78rem; color:#cbd5e1; line-height:1.6; padding-left:1.1rem; }
+    code { background:#0f172a; border:1px solid #334155; border-radius:.3rem; padding:.05rem .3rem; font-size:.72rem; word-break:break-all; }
+    button { margin-top:1.25rem; width:100%; padding:.6rem; border:none; border-radius:.6rem; background:#334155; color:#e2e8f0; font-size:.8rem; font-weight:600; cursor:pointer; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h2>Google-koppeling nog niet geconfigureerd</h2>
+    <p>De OAuth-secrets ontbreken nog op de server. Registreer eenmalig een Google OAuth-client en vul de secrets in bij Cloudflare. Zie <code>OAUTH_SETUP.md</code> voor de volledige stappen.</p>
+    <ol>
+      <li>Maak in Google Cloud Console een OAuth client (type: Web).</li>
+      <li>Voeg deze redirect-URI exact toe:<br><code>${escapeHtml(redirectUri)}</code></li>
+      <li>Zet in Cloudflare Pages de secrets <code>GOOGLE_CLIENT_ID</code> en <code>GOOGLE_CLIENT_SECRET</code>.</li>
+      <li>Optioneel: zet <code>APP_BASE_URL</code> op je vaste domein.</li>
+    </ol>
+    <button onclick="window.close()">Venster sluiten</button>
+  </div>
+</body>
+</html>`;
+
+// Stap 1: redirect de gebruiker naar de Google consent screen.
+app.get("/auth/google", (c) => {
+  const baseUrl = getBaseUrl(c);
+  const redirectUri = `${baseUrl}/auth/google/callback`;
+
+  if (!c.env.GOOGLE_CLIENT_ID || !c.env.GOOGLE_CLIENT_SECRET) {
+    return c.html(oauthSetupNeededPage(redirectUri));
+  }
+
+  // CSRF-bescherming: random state in een HttpOnly cookie, terug te vergelijken
+  // in de callback.
+  const state = crypto.randomUUID();
+  setCookie(c, OAUTH_STATE_COOKIE, state, {
+    httpOnly: true,
+    secure: baseUrl.startsWith("https://"),
+    sameSite: "Lax",
+    path: "/",
+    maxAge: 600,
+  });
+
+  const params = new URLSearchParams({
+    client_id: c.env.GOOGLE_CLIENT_ID,
+    redirect_uri: redirectUri,
+    response_type: "code",
+    scope: GOOGLE_OAUTH_SCOPES,
+    access_type: "offline",
+    include_granted_scopes: "true",
+    prompt: "consent",
+    state,
+  });
+
+  return c.redirect(`${GOOGLE_AUTH_URL}?${params.toString()}`);
+});
+
+// Stap 2: Google stuurt terug met ?code. Wissel code om voor tokens en sla op.
+app.get("/auth/google/callback", async (c) => {
+  const baseUrl = getBaseUrl(c);
+  const redirectUri = `${baseUrl}/auth/google/callback`;
+  const url = new URL(c.req.url);
+  const error = url.searchParams.get("error");
+  const code = url.searchParams.get("code");
+  const state = url.searchParams.get("state");
+  const cookieState = getCookie(c, OAUTH_STATE_COOKIE);
+
+  // State-cookie is eenmalig - altijd opruimen.
+  deleteCookie(c, OAUTH_STATE_COOKIE, { path: "/" });
+
+  if (error) {
+    return c.html(oauthResultPage({ baseUrl, ok: false, title: "Koppeling geannuleerd", message: `Google gaf terug: ${error}` }));
+  }
+  if (!code || !state || !cookieState || state !== cookieState) {
+    return c.html(oauthResultPage({ baseUrl, ok: false, title: "Koppeling mislukt", message: "Ongeldige of verlopen sessie (state-controle). Probeer opnieuw." }));
+  }
+  if (!c.env.GOOGLE_CLIENT_ID || !c.env.GOOGLE_CLIENT_SECRET) {
+    return c.html(oauthSetupNeededPage(redirectUri));
+  }
+
+  try {
+    const tokenRes = await fetch(GOOGLE_TOKEN_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        code,
+        client_id: c.env.GOOGLE_CLIENT_ID,
+        client_secret: c.env.GOOGLE_CLIENT_SECRET,
+        redirect_uri: redirectUri,
+        grant_type: "authorization_code",
+      }).toString(),
+    });
+
+    if (!tokenRes.ok) {
+      const detail = await tokenRes.text();
+      console.error("Google token exchange failed:", detail);
+      return c.html(oauthResultPage({ baseUrl, ok: false, title: "Koppeling mislukt", message: "Token-uitwisseling met Google is mislukt. Controleer client ID/secret en redirect-URI." }));
+    }
+
+    const token = await tokenRes.json<{
+      access_token: string;
+      refresh_token?: string;
+      expires_in?: number;
+      scope?: string;
+    }>();
+
+    // E-mail van het gekoppelde account ophalen (puur informatief in de UI).
+    let email = "";
+    try {
+      const infoRes = await fetch(GOOGLE_USERINFO_URL, {
+        headers: { Authorization: `Bearer ${token.access_token}` },
+      });
+      if (infoRes.ok) {
+        const info = await infoRes.json<{ email?: string }>();
+        email = info.email || "";
+      }
+    } catch (e) {
+      console.error("Userinfo fetch failed:", e);
+    }
+
+    const expiry = Date.now() + (token.expires_in ?? 3600) * 1000;
+
+    // Bestaande refresh token behouden als Google er deze keer geen meegeeft
+    // (Google stuurt 'm alleen bij de eerste consent).
+    const existing = await readGoogleTokens(c.env.DB);
+    const refreshToken = token.refresh_token || existing.refreshToken;
+
+    await c.env.DB.prepare(
+      `UPDATE settings SET
+         google_access_token = ?,
+         google_refresh_token = ?,
+         google_token_expiry = ?,
+         google_email = ?,
+         google_analytics_connected = 1,
+         search_console_connected = 1
+       WHERE id = 1`
+    )
+      .bind(token.access_token, refreshToken, expiry, email)
+      .run();
+
+    return c.html(
+      oauthResultPage({
+        baseUrl,
+        ok: true,
+        title: "Google succesvol gekoppeld",
+        message: email ? `Verbonden als ${email}. Je kunt dit venster sluiten.` : "De koppeling is gelukt. Je kunt dit venster sluiten.",
+      })
+    );
+  } catch (err) {
+    console.error("Google OAuth callback error:", err);
+    return c.html(oauthResultPage({ baseUrl, ok: false, title: "Koppeling mislukt", message: "Er ging iets mis bij het verwerken van de Google-koppeling." }));
+  }
+});
+
+// Koppeling verbreken: tokens wissen, status terug naar niet-verbonden.
+app.post("/api/auth/google/disconnect", async (c) => {
+  await c.env.DB.prepare(
+    `UPDATE settings SET
+       google_access_token = '',
+       google_refresh_token = '',
+       google_token_expiry = 0,
+       google_email = '',
+       google_analytics_connected = 0,
+       search_console_connected = 0
+     WHERE id = 1`
+  ).run();
+  return c.json({ success: true, credentials: await readSettings(c.env.DB) });
 });
 
 app.post("/api/gemini/optimize", async (c) => {

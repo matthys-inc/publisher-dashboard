@@ -1,32 +1,35 @@
 import React, { useState, useEffect } from "react";
-import { 
-  Globe, Plus, Trash2, CheckCircle2, AlertCircle, Linkedin, Twitter, Facebook, Instagram, ShieldCheck, HelpCircle, Sparkles, Key 
+import {
+  Globe, Plus, Trash2, CheckCircle2, AlertCircle, Linkedin, Twitter, Facebook, Instagram, ShieldCheck, HelpCircle, Sparkles, Key, X
 } from "lucide-react";
-import { Website, SocialChannel } from "../types";
+import { Website, SocialChannel, ScheduledPost } from "../types";
 
 interface ChannelsManagerProps {
   darkMode: boolean;
   websites: Website[];
   socials: SocialChannel[];
+  posts: ScheduledPost[];
   onWebsitesUpdated: () => void;
 }
 
-export default function ChannelsManager({ darkMode, websites, socials, onWebsitesUpdated }: ChannelsManagerProps) {
+export default function ChannelsManager({ darkMode, websites, socials, posts, onWebsitesUpdated }: ChannelsManagerProps) {
   const [newWebName, setNewWebName] = useState("");
   const [newWebUrl, setNewWebUrl] = useState("");
   const [newWebCms, setNewWebCms] = useState<"wordpress" | "custom" | "shopify">("wordpress");
   const [addingWebsite, setAddingWebsite] = useState(false);
   const [ssoFeedback, setSsoFeedback] = useState<string | null>(null);
+  const [webFeedback, setWebFeedback] = useState<string | null>(null);
+  // Website die op verwijderen wacht (bevestigingsdialoog).
+  const [pendingDelete, setPendingDelete] = useState<Website | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
-  // Listen for success message from popup (after callback completes)
+  // Listen for success message from the OAuth popup (after callback completes).
+  // De popup draait op hetzelfde domein, dus we accepteren alleen same-origin berichten.
   useEffect(() => {
     const handleMessage = (event: MessageEvent) => {
-      const origin = event.origin;
-      if (!origin.endsWith('.run.app') && !origin.includes('localhost')) {
-        return;
-      }
+      if (event.origin !== window.location.origin) return;
       if (event.data?.type === 'OAUTH_AUTH_SUCCESS') {
-        setSsoFeedback("Kanalen succesvol gesynchroniseerd via Single Sign-On!");
+        setSsoFeedback("Google succesvol gekoppeld via Single Sign-On!");
         onWebsitesUpdated();
         setTimeout(() => setSsoFeedback(null), 5000);
       }
@@ -40,15 +43,46 @@ export default function ChannelsManager({ darkMode, websites, socials, onWebsite
     const height = 650;
     const left = window.screen.width / 2 - width / 2;
     const top = window.screen.height / 2 - height / 2;
-    
+
     const popup = window.open(
-      "/auth/sso",
+      "/auth/google",
       "sso_popup",
       `width=${width},height=${height},top=${top},left=${left},resizable=yes,scrollbars=yes`
     );
-    
+
     if (!popup) {
       alert("Schakel je popupblocker uit om het Single Sign-On machtigingsportaal te openen.");
+    }
+  };
+
+  // Aantal geplande/gepubliceerde posts dat nog naar een site verwijst.
+  const postsTargeting = (websiteId: string) =>
+    posts.filter((p) => Array.isArray(p.targetWebsites) && p.targetWebsites.includes(websiteId)).length;
+
+  const handleConfirmDelete = async () => {
+    if (!pendingDelete) return;
+    setDeleting(true);
+    try {
+      const res = await fetch(`/api/websites/${pendingDelete.id}`, { method: "DELETE" });
+      if (res.ok) {
+        const data = (await res.json().catch(() => ({}))) as { affectedPosts?: number };
+        const affected = typeof data.affectedPosts === "number" ? data.affectedPosts : 0;
+        setWebFeedback(
+          affected > 0
+            ? `Website "${pendingDelete.name}" verwijderd. Let op: ${affected} geplande post(s) verwezen nog naar deze site.`
+            : `Website "${pendingDelete.name}" verwijderd.`
+        );
+        setPendingDelete(null);
+        onWebsitesUpdated();
+        setTimeout(() => setWebFeedback(null), 6000);
+      } else {
+        alert("Verwijderen mislukt. Probeer het opnieuw.");
+      }
+    } catch (err) {
+      console.error(err);
+      alert("Netwerkfout bij het verwijderen.");
+    } finally {
+      setDeleting(false);
     }
   };
 
@@ -191,6 +225,13 @@ export default function ChannelsManager({ darkMode, websites, socials, onWebsite
             </form>
           )}
 
+          {webFeedback && (
+            <div className="p-3 rounded-lg bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200/50 dark:border-emerald-900/40 text-[11px] font-semibold text-emerald-800 dark:text-emerald-300 flex items-center gap-1.5 animate-fadeIn">
+              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400 shrink-0" />
+              <span>{webFeedback}</span>
+            </div>
+          )}
+
           <div className="space-y-3">
             {websites.map(web => (
               <div key={web.id} className="p-4 rounded-xl border border-slate-100 dark:border-slate-850 bg-slate-50/50 dark:bg-slate-900/15 flex justify-between items-center">
@@ -207,13 +248,28 @@ export default function ChannelsManager({ darkMode, websites, socials, onWebsite
                   </div>
                 </div>
 
-                <div className="flex items-center gap-3">
+                <div className="flex items-center gap-2">
                   <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[9px] font-bold bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-400">
                     <CheckCircle2 className="w-3 h-3 text-emerald-500" /> API Verbonden
                   </span>
+                  <button
+                    id={`btn-delete-web-${web.id}`}
+                    onClick={() => setPendingDelete(web)}
+                    title={`Verwijder ${web.name}`}
+                    aria-label={`Verwijder ${web.name}`}
+                    className="p-1.5 rounded-lg text-slate-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-950/40 border border-transparent hover:border-red-200/60 dark:hover:border-red-900/50 transition-all"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
                 </div>
               </div>
             ))}
+
+            {websites.length === 0 && (
+              <div className="p-4 rounded-xl border border-dashed border-slate-200 dark:border-slate-800 text-center text-xs text-slate-400">
+                Nog geen websites gekoppeld. Voeg je eerste website toe met de knop hierboven.
+              </div>
+            )}
           </div>
         </div>
 
@@ -294,6 +350,14 @@ export default function ChannelsManager({ darkMode, websites, socials, onWebsite
             })}
           </div>
 
+          <div className="p-3 rounded-xl bg-amber-50/60 dark:bg-amber-950/20 border border-amber-200/50 dark:border-amber-900/40 text-[11px] text-amber-800 dark:text-amber-300 flex items-start gap-2">
+            <AlertCircle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+            <span>
+              Geautomatiseerd publiceren naar deze socials loopt binnenkort via een <strong>Buffer</strong>-koppeling.
+              De SSO-knop hierboven koppelt nu je <strong>Google</strong>-account (Analytics &amp; Search Console).
+            </span>
+          </div>
+
           <div className="p-4 rounded-xl bg-indigo-50/45 dark:bg-indigo-950/20 border border-indigo-100/40 dark:border-indigo-900/40 text-xs text-indigo-700 dark:text-indigo-400 flex items-start gap-2.5">
             <ShieldCheck className="w-4 h-4 mt-0.5 text-indigo-650 shrink-0" />
             <div className="space-y-1">
@@ -306,6 +370,68 @@ export default function ChannelsManager({ darkMode, websites, socials, onWebsite
         </div>
 
       </div>
+
+      {/* Bevestigingsdialoog voor verwijderen */}
+      {pendingDelete && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/60 backdrop-blur-sm animate-fadeIn"
+          onClick={() => !deleting && setPendingDelete(null)}
+        >
+          <div
+            className="w-full max-w-sm rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 shadow-2xl space-y-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 rounded-lg bg-red-50 dark:bg-red-950/40 text-red-600 dark:text-red-400">
+                  <Trash2 className="w-4 h-4" />
+                </div>
+                <h3 className="text-sm font-bold text-slate-900 dark:text-white">Website verwijderen</h3>
+              </div>
+              <button
+                onClick={() => !deleting && setPendingDelete(null)}
+                className="p-1 rounded-md text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
+                aria-label="Sluiten"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <p className="text-xs text-slate-600 dark:text-slate-400 leading-relaxed">
+              Weet je zeker dat je <strong className="text-slate-900 dark:text-white">{pendingDelete.name}</strong>{" "}
+              (<span className="font-mono">{pendingDelete.url}</span>) wilt verwijderen? Deze actie kan niet ongedaan worden gemaakt.
+            </p>
+
+            {postsTargeting(pendingDelete.id) > 0 && (
+              <div className="p-3 rounded-lg bg-amber-50 dark:bg-amber-950/30 border border-amber-200/60 dark:border-amber-900/50 text-[11px] text-amber-800 dark:text-amber-300 flex items-start gap-2">
+                <AlertCircle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+                <span>
+                  Let op: <strong>{postsTargeting(pendingDelete.id)}</strong> geplande post(s) verwijzen nog naar deze site.
+                  Het verwijderen gaat door, maar controleer daarna je planner.
+                </span>
+              </div>
+            )}
+
+            <div className="flex justify-end gap-2 pt-1">
+              <button
+                onClick={() => setPendingDelete(null)}
+                disabled={deleting}
+                className="px-3 py-2 text-xs font-semibold rounded-lg text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-50"
+              >
+                Annuleer
+              </button>
+              <button
+                id="btn-confirm-delete-web"
+                onClick={handleConfirmDelete}
+                disabled={deleting}
+                className="px-3.5 py-2 text-xs font-bold rounded-lg bg-red-600 hover:bg-red-700 text-white shadow-sm disabled:opacity-60 flex items-center gap-1.5"
+              >
+                {deleting ? "Verwijderen..." : "Definitief verwijderen"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

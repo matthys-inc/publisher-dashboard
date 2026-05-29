@@ -13,6 +13,8 @@ interface IntegrationsManagerProps {
 export default function IntegrationsManager({ darkMode, onCredentialsUpdated }: IntegrationsManagerProps) {
   const [loading, setLoading] = useState(true);
   const [credentials, setCredentials] = useState<IntegrationCredentials>({
+    googleConnected: false,
+    googleEmail: "",
     googleAnalyticsConnected: false,
     googleAnalyticsPropertyId: "",
     searchConsoleConnected: false,
@@ -49,16 +51,13 @@ export default function IntegrationsManager({ darkMode, onCredentialsUpdated }: 
     fetchCredentials();
   }, []);
 
-  // Listen for success message from popup (after callback completes)
+  // Listen for success message from the OAuth popup (after callback completes).
+  // De popup draait op hetzelfde domein -> alleen same-origin berichten accepteren.
   useEffect(() => {
     const handleMessage = (event: MessageEvent) => {
-      // Validate origin is from AI Studio preview or localhost
-      const origin = event.origin;
-      if (!origin.endsWith('.run.app') && !origin.includes('localhost')) {
-        return;
-      }
+      if (event.origin !== window.location.origin) return;
       if (event.data?.type === 'OAUTH_AUTH_SUCCESS') {
-        setFeedback("Single Sign-On (SSO) machtiging succesvol! Google Analytics, GSC en geselecteerde socials zijn nu gekoppeld.");
+        setFeedback("Google succesvol gekoppeld! Analytics en Search Console zijn nu verbonden.");
         fetchCredentials();
         onCredentialsUpdated();
         setTimeout(() => setFeedback(null), 6000);
@@ -73,15 +72,30 @@ export default function IntegrationsManager({ darkMode, onCredentialsUpdated }: 
     const height = 650;
     const left = window.screen.width / 2 - width / 2;
     const top = window.screen.height / 2 - height / 2;
-    
+
     const popup = window.open(
-      "/auth/sso",
+      "/auth/google",
       "sso_popup",
       `width=${width},height=${height},top=${top},left=${left},resizable=yes,scrollbars=yes`
     );
-    
+
     if (!popup) {
-      alert("Schakel je popupblocker uit om het Single Sign-On machtigingsportaal te openen.");
+      alert("Schakel je popupblocker uit om het Google machtigingsportaal te openen.");
+    }
+  };
+
+  const handleDisconnect = async () => {
+    try {
+      const res = await fetch("/api/auth/google/disconnect", { method: "POST" });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.credentials) setCredentials(data.credentials);
+        setFeedback("Google-koppeling verbroken.");
+        onCredentialsUpdated();
+        setTimeout(() => setFeedback(null), 4000);
+      }
+    } catch (e) {
+      console.error("Disconnect failed:", e);
     }
   };
 
@@ -152,21 +166,47 @@ export default function IntegrationsManager({ darkMode, onCredentialsUpdated }: 
           </div>
           <h3 className="text-sm font-bold text-slate-900 dark:text-white flex items-center gap-1.5">
             <Sparkles className="w-4 h-4 text-emerald-500 animate-pulse" />
-            <span>Koppel alles in één keer met Single Sign-On</span>
+            <span>Koppel je Google-account met Single Sign-On</span>
           </h3>
           <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
-            In plaats van handmatige API sleutels in te voeren, kun je via onze beveiligde SSO direct verbinding maken met <strong>Google Analytics 4</strong>, <strong>Google Search Console</strong> en je gewenste <strong>socials</strong> (LinkedIn, Twitter, Facebook, Instagram).
+            Maak via de beveiligde Google OAuth-flow direct verbinding met <strong>Google Analytics 4</strong> en <strong>Google Search Console</strong>. Je tokens worden server-side opgeslagen. Automatisch publiceren naar socials volgt binnenkort via een Buffer-koppeling.
           </p>
+          {credentials.googleConnected && (
+            <p className="text-[11px] font-semibold text-emerald-600 dark:text-emerald-400 flex items-center gap-1.5 pt-1">
+              <CheckCircle2 className="w-3.5 h-3.5" />
+              <span>Verbonden{credentials.googleEmail ? ` als ${credentials.googleEmail}` : ""}</span>
+            </p>
+          )}
         </div>
-        
-        <button
-          id="btn-sso-connect-launch"
-          onClick={handleSSOConnect}
-          className="w-full md:w-auto px-5 py-3 rounded-xl bg-emerald-550 hover:bg-emerald-600 text-white text-xs font-bold shadow-md shadow-emerald-500/10 transition-all hover:scale-[1.02] active:scale-[0.98] flex items-center justify-center gap-2 cursor-pointer shrink-0"
-        >
-          <Key className="w-4 h-4" />
-          <span>Koppel via Single Sign-On</span>
-        </button>
+
+        {credentials.googleConnected ? (
+          <div className="flex flex-col sm:flex-row md:flex-col gap-2 w-full md:w-auto shrink-0">
+            <button
+              id="btn-sso-reconnect"
+              onClick={handleSSOConnect}
+              className="px-5 py-3 rounded-xl bg-emerald-550 hover:bg-emerald-600 text-white text-xs font-bold shadow-md transition-all flex items-center justify-center gap-2 cursor-pointer"
+            >
+              <Key className="w-4 h-4" />
+              <span>Opnieuw koppelen</span>
+            </button>
+            <button
+              id="btn-sso-disconnect"
+              onClick={handleDisconnect}
+              className="px-5 py-3 rounded-xl border border-slate-300 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 text-xs font-bold transition-all flex items-center justify-center gap-2 cursor-pointer"
+            >
+              <span>Ontkoppelen</span>
+            </button>
+          </div>
+        ) : (
+          <button
+            id="btn-sso-connect-launch"
+            onClick={handleSSOConnect}
+            className="w-full md:w-auto px-5 py-3 rounded-xl bg-emerald-550 hover:bg-emerald-600 text-white text-xs font-bold shadow-md shadow-emerald-500/10 transition-all hover:scale-[1.02] active:scale-[0.98] flex items-center justify-center gap-2 cursor-pointer shrink-0"
+          >
+            <Key className="w-4 h-4" />
+            <span>Koppel met Google</span>
+          </button>
+        )}
       </div>
 
       {feedback && (
@@ -246,8 +286,11 @@ export default function IntegrationsManager({ darkMode, onCredentialsUpdated }: 
           <div className="pt-5 border-t border-slate-100 dark:border-slate-800/80 space-y-4">
             <h4 className="text-xs font-bold text-slate-900 dark:text-white flex items-center gap-2">
               <Settings className="w-4 h-4 text-slate-450" />
-              <span>Social Media OAuth &amp; API Sleutels</span>
+              <span>Social Media Publicatie (via Buffer)</span>
             </h4>
+            <p className="text-[11px] text-slate-400 leading-relaxed">
+              Automatisch posten naar LinkedIn, Twitter/X, Facebook en Instagram loopt binnenkort via één Buffer-koppeling. Daarmee is geen aparte app-review per platform nodig.
+            </p>
 
             <div className="space-y-3.5">
               <div className="p-3.5 rounded-lg border border-slate-200/50 bg-slate-50/50 dark:bg-slate-950/20 flex items-center justify-between">
@@ -256,13 +299,13 @@ export default function IntegrationsManager({ darkMode, onCredentialsUpdated }: 
                     <Linkedin className="w-4 h-4" />
                   </div>
                   <div>
-                    <span className="text-xs font-bold text-slate-800 dark:text-slate-100">LinkedIn Developer API</span>
-                    <span className="text-[10px] text-slate-400 block mt-0.5">Automated Page/Profile Posting Scopes</span>
+                    <span className="text-xs font-bold text-slate-800 dark:text-slate-100">LinkedIn</span>
+                    <span className="text-[10px] text-slate-400 block mt-0.5">Posten via Buffer</span>
                   </div>
                 </div>
-                
-                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[9px] font-bold bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-400 border border-emerald-100/50 dark:border-emerald-900/50">
-                  <CheckCircle2 className="w-3 h-3 text-emerald-500" /> Geactiveerd
+
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[9px] font-bold bg-slate-100 dark:bg-slate-900 text-slate-500 dark:text-slate-400 border border-slate-200/50 dark:border-slate-800">
+                  <AlertCircle className="w-3 h-3" /> Binnenkort
                 </span>
               </div>
 
@@ -272,13 +315,13 @@ export default function IntegrationsManager({ darkMode, onCredentialsUpdated }: 
                     <Twitter className="w-4 h-4" />
                   </div>
                   <div>
-                    <span className="text-xs font-bold text-slate-800 dark:text-slate-100">Twitter / X v2 API</span>
-                    <span className="text-[10px] text-slate-400 block mt-0.5">Bearer Token (Read &amp; Write Access)</span>
+                    <span className="text-xs font-bold text-slate-800 dark:text-slate-100">Twitter / X</span>
+                    <span className="text-[10px] text-slate-400 block mt-0.5">Posten via Buffer</span>
                   </div>
                 </div>
-                
-                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[9px] font-bold bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-400 border border-emerald-100/50 dark:border-emerald-900/50">
-                  <CheckCircle2 className="w-3 h-3 text-emerald-500" /> Geactiveerd
+
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[9px] font-bold bg-slate-100 dark:bg-slate-900 text-slate-500 dark:text-slate-400 border border-slate-200/50 dark:border-slate-800">
+                  <AlertCircle className="w-3 h-3" /> Binnenkort
                 </span>
               </div>
             </div>
@@ -294,31 +337,31 @@ export default function IntegrationsManager({ darkMode, onCredentialsUpdated }: 
             
             <div className="space-y-4 text-xs text-slate-600 dark:text-slate-350 leading-relaxed">
               <p>
-                Om je eigen websites en socials live te laden met dit publishing dashboard, dien je eenmalig de juiste credentials op te geven in de serverconfiguratie.
+                Om je Google-account te koppelen registreer je eenmalig een OAuth-client. De volledige stappen staan in <code>OAUTH_SETUP.md</code> in de repo.
               </p>
 
               <div className="space-y-3">
                 <div className="flex gap-2.5">
                   <div className="w-5 h-5 rounded-full bg-slate-100 dark:bg-slate-900 flex items-center justify-center font-bold text-[10px] text-slate-500 shrink-0">1</div>
                   <div>
-                    <span className="font-bold text-slate-800 dark:text-slate-150">Open je Secrets Paneel</span>
-                    <p className="text-[11px] text-slate-400 mt-0.5">Ga rechtsboven in de AI Studio UI naar <strong>Settings &gt; Secrets</strong>.</p>
+                    <span className="font-bold text-slate-800 dark:text-slate-150">Maak een Google OAuth-client</span>
+                    <p className="text-[11px] text-slate-400 mt-0.5">In Google Cloud Console &gt; <strong>APIs &amp; Services &gt; Credentials</strong>, type <strong>Web application</strong>.</p>
                   </div>
                 </div>
 
                 <div className="flex gap-2.5">
                   <div className="w-5 h-5 rounded-full bg-slate-100 dark:bg-slate-900 flex items-center justify-center font-bold text-[10px] text-slate-500 shrink-0">2</div>
                   <div>
-                    <span className="font-bold text-slate-800 dark:text-slate-150">Configureer Environment Variables</span>
-                    <p className="text-[11px] text-slate-400 mt-0.5">Voeg de keys toe die je wilt gebruiken voor de APIs, zoals gedefinieerd in je <code>.env.example</code>.</p>
+                    <span className="font-bold text-slate-800 dark:text-slate-150">Zet de secrets in Cloudflare</span>
+                    <p className="text-[11px] text-slate-400 mt-0.5">Cloudflare Pages &gt; je project &gt; <strong>Settings &gt; Environment variables</strong>: <code>GOOGLE_CLIENT_ID</code> en <code>GOOGLE_CLIENT_SECRET</code>.</p>
                   </div>
                 </div>
 
                 <div className="flex gap-2.5">
                   <div className="w-5 h-5 rounded-full bg-slate-100 dark:bg-slate-900 flex items-center justify-center font-bold text-[10px] text-slate-500 shrink-0">3</div>
                   <div>
-                    <span className="font-bold text-slate-800 dark:text-slate-150">Synchroniseer &amp; Analyseer</span>
-                    <p className="text-[11px] text-slate-400 mt-0.5">Sla de instellingen hiernaast op. Het dashboard toont nu direct de prestaties van je actieve properties en feeds.</p>
+                    <span className="font-bold text-slate-800 dark:text-slate-150">Koppel via Single Sign-On</span>
+                    <p className="text-[11px] text-slate-400 mt-0.5">Klik hierboven op <strong>Koppel met Google</strong> en verleen toegang. De status hieronder springt op CONNECTED.</p>
                   </div>
                 </div>
               </div>
@@ -326,6 +369,12 @@ export default function IntegrationsManager({ darkMode, onCredentialsUpdated }: 
               <div className="pt-3 border-t border-slate-100 dark:border-slate-900/80">
                 <span className="font-bold text-[11px] text-slate-400 uppercase tracking-wider block mb-1">Actuele Status</span>
                 <div className="space-y-2 font-mono text-[11px]">
+                  <div className="flex justify-between">
+                    <span>Google OAuth:</span>
+                    <span className={credentials.googleConnected ? "text-emerald-500 font-bold" : "text-slate-400"}>
+                      {credentials.googleConnected ? "CONNECTED" : "NOT CONNECTED"}
+                    </span>
+                  </div>
                   <div className="flex justify-between">
                     <span>Google Analytics:</span>
                     <span className={credentials.googleAnalyticsConnected ? "text-emerald-500 font-bold" : "text-slate-400"}>
@@ -339,12 +388,8 @@ export default function IntegrationsManager({ darkMode, onCredentialsUpdated }: 
                     </span>
                   </div>
                   <div className="flex justify-between">
-                    <span>Twitter API:</span>
-                    <span className="text-emerald-500 font-bold">LIVE API</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span>LinkedIn API:</span>
-                    <span className="text-emerald-500 font-bold">LIVE API</span>
+                    <span>Socials (Buffer):</span>
+                    <span className="text-slate-400">BINNENKORT</span>
                   </div>
                 </div>
               </div>

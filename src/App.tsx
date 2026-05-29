@@ -310,10 +310,11 @@ export default function App() {
             )}
 
             {activeTab === "channels" && (
-              <ChannelsManager 
+              <ChannelsManager
                 darkMode={darkMode}
                 websites={websites}
                 socials={socials}
+                posts={posts}
                 onWebsitesUpdated={fetchGlobalData}
               />
             )}

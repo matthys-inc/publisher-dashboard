@@ -1,4 +1,12 @@
 # Wrangler leest .dev.vars in voor `wrangler pages dev`.
-# Kopieer naar .dev.vars (niet in git) en vul jouw key in.
+# Kopieer naar .dev.vars (niet in git) en vul jouw waarden in.
 
 GEMINI_API_KEY=
+
+# Google OAuth (zie OAUTH_SETUP.md)
+GOOGLE_CLIENT_ID=
+GOOGLE_CLIENT_SECRET=
+
+# Voor lokaal testen van de OAuth-callback, bv:
+# APP_BASE_URL=http://localhost:8788
+APP_BASE_URL=

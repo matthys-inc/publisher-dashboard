@@ -44,6 +44,8 @@ export interface ChannelPerformance {
 }
 
 export interface IntegrationCredentials {
+  googleConnected: boolean;
+  googleEmail: string;
   googleAnalyticsConnected: boolean;
   googleAnalyticsPropertyId: string;
   searchConsoleConnected: boolean;
