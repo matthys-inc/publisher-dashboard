@@ -70,18 +70,22 @@ Gebruik je een custom domein, vervang dan het domein-gedeelte en zet
 In het Cloudflare dashboard: **Workers & Pages → publisher-dashboard →
 Settings → Environment variables** (voor zowel Production als Preview):
 
-| Naam                   | Waarde                                              |
-| ---------------------- | --------------------------------------------------- |
-| `GOOGLE_CLIENT_ID`     | je client ID                                        |
-| `GOOGLE_CLIENT_SECRET` | je client secret (markeer als **Secret/encrypt**)   |
-| `APP_BASE_URL`         | `https://publisher-dashboard.pages.dev`             |
+| Naam                   | Waarde                                                       |
+| ---------------------- | ------------------------------------------------------------ |
+| `GOOGLE_CLIENT_ID`     | je client ID                                                 |
+| `GOOGLE_CLIENT_SECRET` | je client secret (markeer als **Secret/encrypt**)            |
+| `APP_BASE_URL`         | `https://publisher-dashboard.pages.dev`                      |
+| `SESSION_SECRET`       | lange willekeurige string (markeer als **Secret/encrypt**)   |
+| `ALLOWED_EMAILS`       | komma-gescheiden toegestane accounts (zie §9 Inlogmuur)      |
 
 Of via de CLI:
 
 ```bash
 wrangler pages secret put GOOGLE_CLIENT_ID
 wrangler pages secret put GOOGLE_CLIENT_SECRET
-# APP_BASE_URL mag een gewone (niet-secret) variabele zijn
+wrangler pages secret put SESSION_SECRET
+# APP_BASE_URL en ALLOWED_EMAILS mogen gewone (niet-secret) variabelen zijn.
+# ALLOWED_EMAILS staat ook als baseline in wrangler.toml.
 ```
 
 Na het wijzigen van variabelen: een nieuwe deploy (of "Retry deployment")
@@ -145,7 +149,48 @@ Tokens staan uitsluitend server-side; ze komen nooit in de browser-bundle.
 
 ---
 
-## 8. Nog te doen (volgende ronde)
+## 8. Inlogmuur (Google SSO + allowlist)
+
+Het hele dashboard zit achter een login. De inlog hergebruikt **dezelfde** Google
+OAuth-flow en callback als de GA4/Search Console-koppeling (samengevoegd), dus in
+Google Cloud hoef je niets extra's te configureren.
+
+**Hoe het werkt:**
+
+1. Open je het dashboard zonder geldige sessie, dan zie je een loginscherm met
+   **"Inloggen met Google"**.
+2. Google vraagt in één keer toestemming voor je identiteit (e-mail) én GA4/Search
+   Console.
+3. Staat je e-mail op de allowlist (`ALLOWED_EMAILS`) → je krijgt een ondertekende
+   sessie-cookie van **30 dagen** en bent meteen met analytics gekoppeld.
+4. Staat je e-mail er niet op → "Geen toegang", geen sessie.
+5. Rechtsboven in de header zit een **Uitloggen**-knop.
+
+**Server-side bescherming:** alle `/api/*`-endpoints weigeren met `401` zonder
+geldige sessie. De statische app-shell bevat geen data of secrets; alle gegevens
+komen uitsluitend via die beveiligde endpoints.
+
+**Benodigde variabelen** (zie §3):
+
+| Naam             | Voorbeeld                                              | Opmerking                                  |
+| ---------------- | ------------------------------------------------------ | ------------------------------------------ |
+| `SESSION_SECRET` | lange willekeurige hex-string                          | **Secret.** Genereer met onderstaand commando. |
+| `ALLOWED_EMAILS` | `sm.vanderv33n@gmail.com, info@nordwaartszweden.nl`    | Komma-gescheiden. Baseline in `wrangler.toml`; te overschrijven in het dashboard. |
+
+`SESSION_SECRET` genereren:
+
+```bash
+node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+```
+
+> Adressen toevoegen/verwijderen kan in het Cloudflare-dashboard (`ALLOWED_EMAILS`)
+> zonder code-aanpassing; één nieuwe deploy/"Retry deployment" volstaat. Wijzig je
+> `SESSION_SECRET`, dan worden alle bestaande sessies ongeldig (iedereen moet
+> opnieuw inloggen).
+
+---
+
+## 9. Nog te doen (volgende ronde)
 
 - Live GA4- en Search Console-data daadwerkelijk inladen met deze tokens
   (incl. automatische refresh van verlopen access tokens) in `/api/analytics`.

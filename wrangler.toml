@@ -3,6 +3,13 @@ compatibility_date = "2025-01-15"
 compatibility_flags = ["nodejs_compat"]
 pages_build_output_dir = "dist"
 
+# Inlogmuur: allowlist van toegestane accounts (komma-gescheiden). Niet geheim;
+# je kunt deze ook in het Cloudflare-dashboard zetten/overschrijven zonder commit.
+# Het geheim voor de sessie-cookie (SESSION_SECRET) hoort NIET hier maar als
+# Secret in Cloudflare (en in .dev.vars voor lokaal). Zie OAUTH_SETUP.md.
+[vars]
+ALLOWED_EMAILS = "sm.vanderv33n@gmail.com, info@nordwaartszweden.nl"
+
 [[d1_databases]]
 binding = "DB"
 database_name = "publisher-dashboard-db"

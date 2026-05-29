@@ -10,3 +10,10 @@ GOOGLE_CLIENT_SECRET=
 # Voor lokaal testen van de OAuth-callback, bv:
 # APP_BASE_URL=http://localhost:8788
 APP_BASE_URL=
+
+# --- Inlogmuur ---
+# Geheim om de sessie-cookie te ondertekenen. Genereer iets willekeurigs, bv.:
+#   node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+SESSION_SECRET=
+# Komma-gescheiden lijst van e-mailadressen die mogen inloggen.
+ALLOWED_EMAILS=sm.vanderv33n@gmail.com, info@nordwaartszweden.nl
