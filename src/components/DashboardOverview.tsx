@@ -1,38 +1,51 @@
 import React, { useState, useEffect } from "react";
-import { 
-  AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar, Legend 
+import {
+  AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar,
 } from "recharts";
-import { 
-  TrendingUp, Users, MousePointer, Globe, Eye, ArrowUpRight, 
-  Linkedin, Twitter, Facebook, Instagram, AlertCircle, RefreshCw, Calendar, CheckCircle2 
+import {
+  Eye, Globe, MousePointer, ArrowUpRight, ArrowDownRight, RefreshCw,
+  Linkedin, Twitter, Facebook, Instagram, MoreHorizontal, ChevronLeft, ChevronRight, CalendarDays,
 } from "lucide-react";
 
 import { Website } from "../types";
+import type { WidgetKey } from "../App";
 
 interface DashboardOverviewProps {
   darkMode: boolean;
   onNavigate: (tab: string) => void;
   selectedWebsiteId: string;
   websites: Website[];
+  widgets: Record<WidgetKey, boolean>;
 }
 
-export default function DashboardOverview({ darkMode, onNavigate, selectedWebsiteId, websites }: DashboardOverviewProps) {
+const WEEKDAYS = ["Zo", "Ma", "Di", "Wo", "Do", "Vr", "Za"];
+const MONTHS = [
+  "Januari", "Februari", "Maart", "April", "Mei", "Juni",
+  "Juli", "Augustus", "September", "Oktober", "November", "December",
+];
+
+const RANGE_OPTIONS = [
+  { value: "7", label: "1W" },
+  { value: "30", label: "1M" },
+  { value: "90", label: "3M" },
+];
+
+export default function DashboardOverview({ darkMode, onNavigate, selectedWebsiteId, widgets }: DashboardOverviewProps) {
   const [range, setRange] = useState<string>("30");
   const [loading, setLoading] = useState<boolean>(true);
   const [analytics, setAnalytics] = useState<any>(null);
   const [posts, setPosts] = useState<any[]>([]);
   const [socials, setSocials] = useState<any[]>([]);
+  const [calMonth, setCalMonth] = useState<Date>(() => new Date());
 
   const fetchDashboardData = async () => {
     setLoading(true);
     try {
-      // Fetch general API data
       const dataRes = await fetch("/api/data");
-      const appData = await dataRes.json();
+      const appData = await dataRes.json() as { posts?: any[]; socials?: any[] };
       setPosts(appData.posts || []);
       setSocials(appData.socials || []);
 
-      // Fetch dynamic analytics charts
       const analyticsRes = await fetch(`/api/analytics?range=${range}`);
       const analyticsData = await analyticsRes.json();
       setAnalytics(analyticsData);
@@ -56,31 +69,25 @@ export default function DashboardOverview({ darkMode, onNavigate, selectedWebsit
     );
   }
 
-  // Generate unique stable metrics factor based on selected website ID
+  // Stabiele schaalfactor per geselecteerde website.
   const getWebsiteIndexFactor = (id: string) => {
     if (id === "all") return 1.0;
     let sum = 0;
-    for (let i = 0; i < id.length; i++) {
-      sum += id.charCodeAt(i);
-    }
-    return 0.35 + (sum % 4) * 0.15; // Stable values: 0.35, 0.50, 0.65, 0.80
+    for (let i = 0; i < id.length; i++) sum += id.charCodeAt(i);
+    return 0.35 + (sum % 4) * 0.15;
   };
-
   const factor = getWebsiteIndexFactor(selectedWebsiteId);
 
-  // Filter posts based on selected brand context
   const filteredPostsList = selectedWebsiteId === "all"
     ? posts
     : posts.filter((p: any) => p.targetWebsites && p.targetWebsites.includes(selectedWebsiteId));
 
   const { totals: rawTotals, performance: rawPerformance } = analytics;
 
-  // Scale totals and performance curve proportionally to currently selected website
   const totals = {
     views: Math.round(rawTotals.views * factor),
     organicClicks: Math.round(rawTotals.organicClicks * factor),
     socialClicks: Math.round(rawTotals.socialClicks * factor),
-    bounceRate: parseFloat((rawTotals.bounceRate + (factor - 0.5) * 4).toFixed(1))
   };
 
   const performance = rawPerformance.map((p: any) => ({
@@ -90,387 +97,356 @@ export default function DashboardOverview({ darkMode, onNavigate, selectedWebsit
     socialClicks: Math.round(p.socialClicks * factor),
   }));
 
-  const connectedSocials = socials.filter(s => s.connected);
-  
-  // Scale social metrics too if a specific website is selected
-  const totalFollowers = Math.round(
-    socials.reduce((acc, s) => acc + (s.connected ? s.followers : 0), 0) * (selectedWebsiteId === "all" ? 1.0 : factor * 1.2)
-  );
+  const connectedSocials = socials.filter((s) => s.connected);
+  const reachData = connectedSocials.map((s) => ({ name: s.name, value: s.followers }));
+  const maxFollowers = Math.max(1, ...connectedSocials.map((s) => s.followers));
+
+  // KPI-kaarten.
+  const kpis = [
+    {
+      id: "views", label: "Paginaweergaven", icon: Eye, value: totals.views,
+      delta: 12.4, up: true, accent: "emerald", sub: "vs vorige periode",
+    },
+    {
+      id: "organic", label: "Organisch verkeer", icon: Globe, value: totals.organicClicks,
+      delta: 8.2, up: true, accent: "sky", sub: "via Google Zoeken",
+    },
+    {
+      id: "social", label: "Social clicks", icon: MousePointer, value: totals.socialClicks,
+      delta: 24.1, up: true, accent: "violet", sub: "via gedeelde links",
+    },
+  ];
+
+  // Kalender-berekeningen.
+  const year = calMonth.getFullYear();
+  const month = calMonth.getMonth();
+  const firstWeekday = new Date(year, month, 1).getDay();
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+  const todayStr = new Date().toDateString();
+
+  const eventsByDay: Record<number, number> = {};
+  for (const p of filteredPostsList) {
+    const d = new Date(p.scheduledAt);
+    if (d.getFullYear() === year && d.getMonth() === month) {
+      eventsByDay[d.getDate()] = (eventsByDay[d.getDate()] || 0) + 1;
+    }
+  }
+
+  const upcomingEvents = [...filteredPostsList]
+    .filter((p) => new Date(p.scheduledAt) >= new Date(new Date().toDateString()))
+    .sort((a, b) => new Date(a.scheduledAt).getTime() - new Date(b.scheduledAt).getTime())
+    .slice(0, 3);
+
+  const accentClasses: Record<string, { bg: string; text: string }> = {
+    emerald: { bg: "bg-emerald-500/10", text: "text-emerald-500" },
+    sky: { bg: "bg-sky-500/10", text: "text-sky-500" },
+    violet: { bg: "bg-violet-500/10", text: "text-violet-500" },
+  };
+
+  const statusCounts = {
+    scheduled: filteredPostsList.filter((p) => p.status === "scheduled").length,
+    published: filteredPostsList.filter((p) => p.status === "published").length,
+    draft: filteredPostsList.filter((p) => p.status === "draft").length,
+  };
+  const totalPosts = Math.max(1, statusCounts.scheduled + statusCounts.published + statusCounts.draft);
+
+  const leftSpan = widgets.calendar ? "xl:col-span-2" : "xl:col-span-3";
 
   return (
-    <div className="space-y-6">
-      {/* Top Welcome / Range Selector */}
-      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 border-b border-slate-100 dark:border-slate-800 pb-5">
-        <div>
-          <h2 className="text-xl font-bold font-sans tracking-tight text-slate-900 dark:text-white">
-            Prestaties & Statistieken
-          </h2>
-          <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">
-            Volg geplande publicaties, kanaalbereik en conversiemetrics direct vanaf één centraal punt.
-          </p>
-        </div>
-        
-        <div className="flex bg-slate-100 dark:bg-slate-800 p-1 rounded-lg border border-slate-200/50 dark:border-slate-700/50">
-          <button 
-            id="range-7d"
-            onClick={() => setRange("7")}
-            className={`px-3 py-1.5 text-xs font-semibold rounded-md transition-all ${
-              range === "7" 
-                ? "bg-white dark:bg-slate-900 shadow-sm text-slate-900 dark:text-white" 
-                : "text-slate-500 hover:text-slate-900 dark:hover:text-amber-50"
-            }`}
-          >
-            7 Dagen
-          </button>
-          <button 
-            id="range-30d"
-            onClick={() => setRange("30")}
-            className={`px-3 py-1.5 text-xs font-semibold rounded-md transition-all ${
-              range === "30" 
-                ? "bg-white dark:bg-slate-900 shadow-sm text-slate-900 dark:text-white" 
-                : "text-slate-500 hover:text-slate-900 dark:hover:text-amber-50"
-            }`}
-          >
-            30 Dagen
-          </button>
-          <button 
-            id="range-90d"
-            onClick={() => setRange("90")}
-            className={`px-3 py-1.5 text-xs font-semibold rounded-md transition-all ${
-              range === "90" 
-                ? "bg-white dark:bg-slate-900 shadow-sm text-slate-900 dark:text-white" 
-                : "text-slate-500 hover:text-slate-900 dark:hover:text-amber-50"
-            }`}
-          >
-            90 Dagen
-          </button>
-        </div>
-      </div>
-
-      {/* Metric Cards Grid */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-        {/* Card: Total Views */}
-        <div id="stat-views" className="bento-card relative overflow-hidden transition-all duration-300 hover:scale-[1.015] hover:shadow-bento-glow">
-          <div className="flex justify-between items-start">
-            <span className="text-xs font-medium font-mono text-slate-400 dark:text-slate-500 uppercase tracking-widest">
-              Paginaweergaven (Blog/Web)
-            </span>
-            <div className="p-1.5 rounded-lg bg-emerald-500/10 text-emerald-500">
-              <Eye className="w-4 h-4" />
-            </div>
-          </div>
-          <div className="text-[10px] uppercase font-bold tracking-wider mt-1.5 text-slate-500 font-mono">GA4 LIVE</div>
-          <div className="mt-1">
-            <h3 className="text-2xl font-extrabold text-slate-900 dark:text-gray-100 font-display tracking-tight">
-              {totals.views?.toLocaleString()}
-            </h3>
-            <div className="flex items-center gap-1.5 text-xs text-emerald-500 font-medium mt-1">
-              <TrendingUp className="w-3.5 h-3.5" />
-              <span>+12.4% vs vorige periode</span>
-            </div>
-          </div>
-        </div>
-
-        {/* Card: Organic Clicks From Google */}
-        <div id="stat-organic" className="bento-card relative overflow-hidden transition-all duration-300 hover:scale-[1.015] hover:shadow-bento-blue-glow">
-          <div className="flex justify-between items-start">
-            <span className="text-xs font-medium font-mono text-slate-400 dark:text-slate-500 uppercase tracking-widest">
-              Organisch Verkeer (GSC)
-            </span>
-            <div className="p-1.5 rounded-lg bg-blue-500/10 text-blue-400">
-              <Globe className="w-4 h-4" />
-            </div>
-          </div>
-          <div className="text-[10px] uppercase font-bold tracking-wider mt-1.5 text-slate-500 font-mono">GOOGLE</div>
-          <div className="mt-1">
-            <h3 className="text-2xl font-extrabold text-slate-900 dark:text-gray-100 font-display tracking-tight">
-              {totals.organicClicks?.toLocaleString()}
-            </h3>
-            <div className="flex items-center gap-1.5 text-xs text-blue-400 font-medium mt-1">
-              <TrendingUp className="w-3.5 h-3.5" />
-              <span>+8.2% via Google Zoeken</span>
-            </div>
-          </div>
-        </div>
-
-        {/* Card: Social Media Driven traffic */}
-        <div id="stat-socials" className="bento-card relative overflow-hidden transition-all duration-300 hover:scale-[1.015] hover:shadow-bento-glow">
-          <div className="flex justify-between items-start">
-            <span className="text-xs font-medium font-mono text-slate-400 dark:text-slate-500 uppercase tracking-widest">
-              Social Clicks (LinkedIn/X)
-            </span>
-            <div className="p-1.5 rounded-lg bg-emerald-500/10 text-emerald-500">
-              <MousePointer className="w-4 h-4" />
-            </div>
-          </div>
-          <div className="text-[10px] uppercase font-bold tracking-wider mt-1.5 text-slate-500 font-mono">SOCIAL CHANNELS</div>
-          <div className="mt-1">
-            <h3 className="text-2xl font-extrabold text-slate-900 dark:text-gray-100 font-display tracking-tight">
-              {totals.socialClicks?.toLocaleString()}
-            </h3>
-            <div className="flex items-center gap-1.5 text-xs text-emerald-400 font-medium mt-1">
-              <TrendingUp className="w-3.5 h-3.5" />
-              <span>+24.1% via doorgestuurde links</span>
-            </div>
-          </div>
-        </div>
-
-        {/* Card: Social Followers Pool */}
-        <div id="stat-followers" className="bento-card relative overflow-hidden transition-all duration-300 hover:scale-[1.015] hover:shadow-bento-glow">
-          <div className="flex justify-between items-start">
-            <span className="text-xs font-medium font-mono text-slate-400 dark:text-slate-500 uppercase tracking-widest">
-              Totaal Social Volgers
-            </span>
-            <div className="p-1.5 rounded-lg bg-pink-500/10 text-pink-500">
-              <Users className="w-4 h-4" />
-            </div>
-          </div>
-          <div className="text-[10px] uppercase font-bold tracking-wider mt-1.5 text-slate-500 font-mono">ENGAGED NETWORKS</div>
-          <div className="mt-1">
-            <h3 className="text-2xl font-extrabold text-slate-900 dark:text-gray-100 font-display tracking-tight">
-              {totalFollowers?.toLocaleString()}
-            </h3>
-            <div className="flex items-center gap-1.5 text-xs text-pink-405 font-medium mt-1">
-              <span>Over {connectedSocials.length} actieve accounts</span>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* Main Charts & Side Columns */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        
-        {/* Left Span: Traffic Trends chart */}
-        <div className="lg:col-span-2 bento-card flex flex-col justify-between transition-all duration-300 hover:scale-[1.005] hover:shadow-bento-glow">
-          <div className="flex justify-between items-center mb-6">
-            <div>
-              <h3 className="text-sm font-bold text-slate-900 dark:text-white font-display">
-                Kanaal Prestatie Overzicht
-              </h3>
-              <p className="text-xs text-slate-400 dark:text-slate-500">
-                Organisch zoekverkeer versus promotie via gekoppelde sociale platforms.
-              </p>
-            </div>
-            
-            <div className="flex items-center gap-4 text-xs font-mono">
-              <div className="flex items-center gap-1.5">
-                <span className="w-3 h-3 rounded-full bg-emerald-500 block"></span>
-                <span className="text-slate-600 dark:text-slate-400">Zoekopdrachten</span>
-              </div>
-              <div className="flex items-center gap-1.5">
-                <span className="w-3 h-3 rounded-full bg-sky-450 block"></span>
-                <span className="text-slate-600 dark:text-slate-400">Social Media</span>
-              </div>
-            </div>
-          </div>
-
-          <div className="h-72 w-full">
-            <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={performance} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
-                <defs>
-                  <linearGradient id="colorOrganic" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="#10b981" stopOpacity={0.25}/>
-                    <stop offset="95%" stopColor="#10b981" stopOpacity={0}/>
-                  </linearGradient>
-                  <linearGradient id="colorSocial" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="#38bdf8" stopOpacity={0.25}/>
-                    <stop offset="95%" stopColor="#38bdf8" stopOpacity={0}/>
-                  </linearGradient>
-                </defs>
-                <CartesianGrid strokeDasharray="3 3" stroke={darkMode ? "rgba(255, 255, 255, 0.05)" : "#f1f5f9"} />
-                <XAxis 
-                  dataKey="date" 
-                  tick={{ fill: darkMode ? "#94a3b8" : "#64748b", fontSize: 10 }} 
-                  axisLine={{ stroke: darkMode ? "rgba(255, 255, 255, 0.1)" : "#e2e8f0" }}
-                  tickLine={false}
-                />
-                <YAxis 
-                  tick={{ fill: darkMode ? "#94a3b8" : "#64748b", fontSize: 10 }}
-                  axisLine={{ stroke: darkMode ? "rgba(255, 255, 255, 0.1)" : "#e2e8f0" }}
-                  tickLine={false}
-                />
-                <Tooltip 
-                  contentStyle={{ 
-                    backgroundColor: darkMode ? "#151515" : "#ffffff", 
-                    borderColor: darkMode ? "rgba(255, 255, 255, 0.1)" : "#e2e8f0",
-                    color: darkMode ? "#f8fafc" : "#0f172a",
-                    borderRadius: "12px",
-                    fontSize: "12px"
-                  }} 
-                />
-                <Area type="monotone" dataKey="organicClicks" name="Organisch" stroke="#10b981" strokeWidth={2} fillOpacity={1} fill="url(#colorOrganic)" />
-                <Area type="monotone" dataKey="socialClicks" name="Socials" stroke="#38bdf8" strokeWidth={2} fillOpacity={1} fill="url(#colorSocial)" />
-              </AreaChart>
-            </ResponsiveContainer>
-          </div>
-        </div>
-
-        {/* Right Span: Social Reach Breakdown & Recent Status */}
-        <div className="space-y-4">
-          
-          {/* Channel Leaderboard */}
-          <div className="bento-card transition-all duration-300 hover:scale-[1.005] hover:shadow-bento-glow">
-            <h3 className="text-sm font-bold text-slate-900 dark:text-white mb-4 font-display">
-              Bereik per Social Kanaal
-            </h3>
-            
-            <div className="space-y-3.5">
-              {socials.map((channel) => {
-                const isLinkedIn = channel.id === "linkedin";
-                const isTwitter = channel.id === "twitter";
-                const isFacebook = channel.id === "facebook";
-                const isInstagram = channel.id === "instagram";
-                
-                return (
-                  <div key={channel.id} className="flex justify-between items-center bg-slate-50 dark:bg-slate-950/40 p-2.5 rounded-lg border border-slate-100 dark:border-white/5">
-                    <div className="flex items-center gap-2.5">
-                      <div className={`p-1.5 rounded ${
-                        isLinkedIn ? "bg-blue-50 dark:bg-blue-950/40 text-blue-600" :
-                        isTwitter ? "bg-slate-100 dark:bg-slate-800 text-slate-850 dark:text-slate-100" :
-                        isFacebook ? "bg-indigo-50 dark:bg-indigo-950/40 text-indigo-600" :
-                        "bg-pink-50 dark:bg-pink-950/40 text-pink-500"
-                      }`}>
-                        {isLinkedIn && <Linkedin className="w-4 h-4" />}
-                        {isTwitter && <Twitter className="w-4 h-4" />}
-                        {isFacebook && <Facebook className="w-4 h-4" />}
-                        {isInstagram && <Instagram className="w-4 h-4" />}
-                      </div>
-                      <div>
-                        <div className="text-xs font-semibold text-slate-800 dark:text-slate-200">
-                          {channel.name}
+    <div className="space-y-5">
+      {/* Bovenste rij: KPI's + grafiek links, kalender rechts */}
+      {(widgets.metrics || widgets.chart || widgets.calendar) && (
+        <div className="grid grid-cols-1 gap-5 xl:grid-cols-3">
+          <div className={`space-y-5 ${leftSpan}`}>
+            {/* KPI-kaarten */}
+            {widgets.metrics && (
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+                {kpis.map((k) => {
+                  const Icon = k.icon;
+                  const ac = accentClasses[k.accent];
+                  return (
+                    <div key={k.id} id={`stat-${k.id}`} className="bento-card">
+                      <div className="flex items-start justify-between">
+                        <div className="flex items-center gap-2">
+                          <span className={`flex h-7 w-7 items-center justify-center rounded-lg ${ac.bg} ${ac.text}`}>
+                            <Icon className="h-3.5 w-3.5" />
+                          </span>
+                          <span className="text-xs font-medium text-slate-500 dark:text-slate-400">{k.label}</span>
                         </div>
-                        <div className="text-[10px] text-slate-400 font-mono">
-                          {channel.handle}
-                        </div>
+                        <span
+                          className={`flex items-center gap-0.5 rounded-full px-1.5 py-0.5 text-[10px] font-semibold ${
+                            k.up
+                              ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
+                              : "bg-rose-500/10 text-rose-600 dark:text-rose-400"
+                          }`}
+                        >
+                          {k.up ? <ArrowUpRight className="h-3 w-3" /> : <ArrowDownRight className="h-3 w-3" />}
+                          {k.delta}%
+                        </span>
                       </div>
+                      <div className="mt-3 text-2xl font-bold tracking-tight text-slate-900 dark:text-white font-display">
+                        {k.value?.toLocaleString("nl-NL")}
+                      </div>
+                      <div className="mt-0.5 text-[11px] text-slate-400">{k.sub}</div>
                     </div>
+                  );
+                })}
+              </div>
+            )}
 
-                    <div className="text-right">
-                      <div className="text-xs font-bold text-slate-900 dark:text-white">
-                        {channel.connected ? `${channel.followers.toLocaleString()} volgers` : "Gekoppeld"}
+            {/* Verkeer-grafiek */}
+            {widgets.chart && (
+              <div className="bento-card">
+                <div className="mb-5 flex items-start justify-between">
+                  <div>
+                    <h3 className="text-sm font-bold text-slate-900 dark:text-white font-display">Verkeer</h3>
+                    <p className="text-xs text-slate-400">Organisch zoekverkeer vs. social</p>
+                  </div>
+                  <div className="flex items-center gap-1 rounded-lg bg-slate-100 p-0.5 dark:bg-white/5">
+                    {RANGE_OPTIONS.map((r) => (
+                      <button
+                        key={r.value}
+                        onClick={() => setRange(r.value)}
+                        className={`rounded-md px-2.5 py-1 text-[11px] font-semibold transition ${
+                          range === r.value
+                            ? "bg-white text-slate-900 shadow-sm dark:bg-slate-800 dark:text-white"
+                            : "text-slate-500 hover:text-slate-800 dark:hover:text-slate-200"
+                        }`}
+                      >
+                        {r.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div className="h-64 w-full">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <AreaChart data={performance} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+                      <defs>
+                        <linearGradient id="colorOrganic" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="5%" stopColor="#10b981" stopOpacity={0.25} />
+                          <stop offset="95%" stopColor="#10b981" stopOpacity={0} />
+                        </linearGradient>
+                        <linearGradient id="colorSocial" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="5%" stopColor="#8b5cf6" stopOpacity={0.25} />
+                          <stop offset="95%" stopColor="#8b5cf6" stopOpacity={0} />
+                        </linearGradient>
+                      </defs>
+                      <CartesianGrid strokeDasharray="3 3" stroke={darkMode ? "rgba(255,255,255,0.05)" : "#f1f5f9"} />
+                      <XAxis dataKey="date" tick={{ fill: darkMode ? "#94a3b8" : "#64748b", fontSize: 10 }} axisLine={false} tickLine={false} />
+                      <YAxis tick={{ fill: darkMode ? "#94a3b8" : "#64748b", fontSize: 10 }} axisLine={false} tickLine={false} />
+                      <Tooltip
+                        contentStyle={{
+                          backgroundColor: darkMode ? "#151515" : "#ffffff",
+                          borderColor: darkMode ? "rgba(255,255,255,0.1)" : "#e2e8f0",
+                          color: darkMode ? "#f8fafc" : "#0f172a",
+                          borderRadius: "12px",
+                          fontSize: "12px",
+                        }}
+                      />
+                      <Area type="monotone" dataKey="organicClicks" name="Organisch" stroke="#10b981" strokeWidth={2} fill="url(#colorOrganic)" />
+                      <Area type="monotone" dataKey="socialClicks" name="Social" stroke="#8b5cf6" strokeWidth={2} fill="url(#colorSocial)" />
+                    </AreaChart>
+                  </ResponsiveContainer>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Kalender */}
+          {widgets.calendar && (
+            <div className="bento-card xl:col-span-1">
+              <div className="mb-4 flex items-center justify-between">
+                <h3 className="flex items-center gap-2 text-sm font-bold text-slate-900 dark:text-white font-display">
+                  <CalendarDays className="h-4 w-4 text-emerald-500" /> Kalender
+                </h3>
+                <div className="flex items-center gap-1">
+                  <button
+                    onClick={() => setCalMonth(new Date(year, month - 1, 1))}
+                    className="rounded-md p-1 text-slate-400 hover:bg-slate-100 dark:hover:bg-white/5"
+                  >
+                    <ChevronLeft className="h-4 w-4" />
+                  </button>
+                  <span className="w-24 text-center text-xs font-semibold text-slate-700 dark:text-slate-200">
+                    {MONTHS[month]}
+                  </span>
+                  <button
+                    onClick={() => setCalMonth(new Date(year, month + 1, 1))}
+                    className="rounded-md p-1 text-slate-400 hover:bg-slate-100 dark:hover:bg-white/5"
+                  >
+                    <ChevronRight className="h-4 w-4" />
+                  </button>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-7 gap-1 text-center">
+                {WEEKDAYS.map((d) => (
+                  <div key={d} className="py-1 text-[10px] font-semibold text-slate-400">{d}</div>
+                ))}
+                {Array.from({ length: firstWeekday }).map((_, i) => (
+                  <div key={`empty-${i}`} />
+                ))}
+                {Array.from({ length: daysInMonth }).map((_, i) => {
+                  const day = i + 1;
+                  const isToday = new Date(year, month, day).toDateString() === todayStr;
+                  const hasEvent = !!eventsByDay[day];
+                  return (
+                    <div key={day} className="flex flex-col items-center">
+                      <div
+                        className={`flex h-7 w-7 items-center justify-center rounded-full text-[11px] font-medium ${
+                          isToday
+                            ? "bg-emerald-500 text-white"
+                            : "text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-white/5"
+                        }`}
+                      >
+                        {day}
                       </div>
+                      <span className={`mt-0.5 h-1 w-1 rounded-full ${hasEvent && !isToday ? "bg-emerald-500" : "bg-transparent"}`} />
+                    </div>
+                  );
+                })}
+              </div>
+
+              <div className="mt-4 space-y-2 border-t border-slate-100 pt-4 dark:border-white/10">
+                <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Aankomend</div>
+                {upcomingEvents.length === 0 && (
+                  <div className="text-xs text-slate-400">Geen geplande publicaties.</div>
+                )}
+                {upcomingEvents.map((p) => (
+                  <div key={p.id} className="flex items-center gap-2.5 rounded-lg bg-slate-50 p-2 dark:bg-white/5">
+                    <div className="flex h-8 w-8 flex-col items-center justify-center rounded-md bg-emerald-500/10 text-emerald-600 dark:text-emerald-400">
+                      <span className="text-xs font-bold leading-none">{new Date(p.scheduledAt).getDate()}</span>
+                      <span className="text-[8px] uppercase">{MONTHS[new Date(p.scheduledAt).getMonth()].slice(0, 3)}</span>
+                    </div>
+                    <div className="min-w-0">
+                      <div className="truncate text-xs font-semibold text-slate-800 dark:text-slate-100">{p.title}</div>
                       <div className="text-[10px] text-slate-400">
-                        {channel.connected ? `${channel.engagementRate}% engagement` : "Niet verbonden"}
+                        {new Date(p.scheduledAt).toLocaleTimeString("nl-NL", { hour: "2-digit", minute: "2-digit" })}
                       </div>
                     </div>
                   </div>
-                );
-              })}
-            </div>
-            
-            <button 
-              id="goto-integrations-btn"
-              onClick={() => onNavigate("integrations")}
-              className="w-full text-center text-xs font-bold text-emerald-500 hover:text-emerald-400 mt-4 block transition-all hover:underline"
-            >
-              Verbind meer kanalen &rarr;
-            </button>
-          </div>
-
-          {/* Quick Stats Summary */}
-          <div className="p-5 rounded-2xl border border-dashed border-slate-250 dark:border-white/10 bg-slate-50/50 dark:bg-white/[0.02]">
-            <h4 className="text-xs font-bold text-slate-900 dark:text-white uppercase tracking-widest flex items-center gap-1 mb-2 font-mono">
-              <Calendar className="w-3.5 h-3.5 text-emerald-500" /> Actuele Planningsstatus
-            </h4>
-            <div className="grid grid-cols-2 gap-2 text-center">
-              <div className="bg-white dark:bg-slate-950/50 p-2.5 rounded-lg border border-slate-100 dark:border-white/5">
-                <div className="text-lg font-bold text-emerald-500">
-                  {filteredPostsList.filter(p => p.status === "scheduled").length}
-                </div>
-                <div className="text-[10px] text-slate-400">Ingepland</div>
-              </div>
-              <div className="bg-white dark:bg-slate-950/50 p-2.5 rounded-lg border border-slate-100 dark:border-white/5">
-                <div className="text-lg font-bold text-emerald-405">
-                  {filteredPostsList.filter(p => p.status === "published").length}
-                </div>
-                <div className="text-[10px] text-slate-400">Gepubliceerd</div>
+                ))}
               </div>
             </div>
-          </div>
-
+          )}
         </div>
-      </div>
+      )}
 
-      {/* Recent Posts Tracker */}
-      <div className="bento-card transition-all duration-300 hover:scale-[1.002] hover:shadow-bento-glow">
-        <div className="flex justify-between items-center mb-4">
-          <div>
-            <h3 className="text-xs uppercase font-bold text-slate-400 dark:text-gray-500 tracking-widest font-mono">
-              Recente Content & Sociale Distributie
-            </h3>
-            <p className="text-xs text-slate-400 dark:text-slate-500 mt-1">
-              Controleer of de doorgestuurde artikelen succesvol naar je aangesloten socials zijn verzonden.
-            </p>
-          </div>
-          <button 
-            id="planner-navigate-btn"
-            onClick={() => onNavigate("planner")}
-            className="text-xs font-semibold text-emerald-500 hover:underline flex items-center gap-1"
-          >
-            Alle content bekijken <ArrowUpRight className="w-3.5 h-3.5" />
-          </button>
-        </div>
+      {/* Onderste rij: content-status, bereik, top kanalen */}
+      {(widgets.leads || widgets.retention || widgets.locations) && (
+        <div className="grid grid-cols-1 gap-5 lg:grid-cols-3">
+          {/* Content-status */}
+          {widgets.leads && (
+            <div className="bento-card">
+              <div className="mb-4 flex items-center justify-between">
+                <h3 className="text-sm font-bold text-slate-900 dark:text-white font-display">Content-status</h3>
+                <button onClick={() => onNavigate("planner")} className="text-slate-300 hover:text-slate-500">
+                  <MoreHorizontal className="h-4 w-4" />
+                </button>
+              </div>
 
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-xs">
-            <thead>
-              <tr className="border-b border-slate-100 dark:border-slate-800 text-slate-400 font-mono">
-                <th className="py-2.5 font-medium">Titel</th>
-                <th className="py-2.5 font-medium">Ingepland Voor</th>
-                <th className="py-2.5 font-medium">Sync Socials</th>
-                <th className="py-2.5 font-medium">SEO Score</th>
-                <th className="py-2.5 font-medium">Status</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100 dark:divide-slate-800/50 text-slate-600 dark:text-slate-350">
-              {filteredPostsList.slice(0, 3).map((post) => (
-                <tr key={post.id} className="hover:bg-slate-50/50 dark:hover:bg-slate-900/10">
-                  <td className="py-3 font-semibold text-slate-800 dark:text-slate-100 truncate max-w-xs sm:max-w-md">
-                    {post.title}
-                  </td>
-                  <td className="py-3 font-mono text-slate-500 dark:text-slate-400">
-                    {new Date(post.scheduledAt).toLocaleDateString("nl-NL")} om {" "}
-                    {new Date(post.scheduledAt).toLocaleTimeString("nl-NL", { hour: "2-digit", minute: "2-digit" })}
-                  </td>
-                  <td className="py-3">
-                    {post.sendToSocials ? (
-                      <div className="flex gap-1">
-                        {post.socialPlatforms.map((platform: string) => (
-                          <span 
-                            key={platform}
-                            className="px-1.5 py-0.5 text-[9px] font-bold rounded uppercase bg-indigo-50 dark:bg-indigo-950 text-indigo-600 dark:text-indigo-300 border border-indigo-100 dark:border-indigo-900"
-                          >
-                            {platform}
+              <div className="flex h-2 overflow-hidden rounded-full bg-slate-100 dark:bg-white/5">
+                <div className="bg-emerald-500" style={{ width: `${(statusCounts.published / totalPosts) * 100}%` }} />
+                <div className="bg-sky-400" style={{ width: `${(statusCounts.scheduled / totalPosts) * 100}%` }} />
+                <div className="bg-slate-300 dark:bg-white/20" style={{ width: `${(statusCounts.draft / totalPosts) * 100}%` }} />
+              </div>
+
+              <div className="mt-4 space-y-3">
+                {[
+                  { label: "Gepubliceerd", count: statusCounts.published, color: "bg-emerald-500" },
+                  { label: "Ingepland", count: statusCounts.scheduled, color: "bg-sky-400" },
+                  { label: "Concept", count: statusCounts.draft, color: "bg-slate-300 dark:bg-white/20" },
+                ].map((s) => (
+                  <div key={s.label} className="flex items-center justify-between">
+                    <span className="flex items-center gap-2 text-xs text-slate-600 dark:text-slate-300">
+                      <span className={`h-2 w-2 rounded-full ${s.color}`} /> {s.label}
+                    </span>
+                    <span className="text-xs font-bold text-slate-900 dark:text-white">{s.count}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Bereik per kanaal */}
+          {widgets.retention && (
+            <div className="bento-card">
+              <div className="mb-4 flex items-center justify-between">
+                <div>
+                  <h3 className="text-sm font-bold text-slate-900 dark:text-white font-display">Bereik per kanaal</h3>
+                  <p className="text-[11px] text-slate-400">Volgers per social-platform</p>
+                </div>
+              </div>
+              <div className="h-44 w-full">
+                {reachData.length > 0 ? (
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart data={reachData} margin={{ top: 5, right: 5, left: -25, bottom: 0 }}>
+                      <CartesianGrid strokeDasharray="3 3" vertical={false} stroke={darkMode ? "rgba(255,255,255,0.05)" : "#f1f5f9"} />
+                      <XAxis dataKey="name" tick={{ fill: darkMode ? "#94a3b8" : "#64748b", fontSize: 9 }} axisLine={false} tickLine={false} />
+                      <YAxis tick={{ fill: darkMode ? "#94a3b8" : "#64748b", fontSize: 9 }} axisLine={false} tickLine={false} />
+                      <Tooltip
+                        cursor={{ fill: darkMode ? "rgba(255,255,255,0.04)" : "rgba(0,0,0,0.03)" }}
+                        contentStyle={{
+                          backgroundColor: darkMode ? "#151515" : "#ffffff",
+                          borderColor: darkMode ? "rgba(255,255,255,0.1)" : "#e2e8f0",
+                          borderRadius: "12px", fontSize: "12px",
+                        }}
+                      />
+                      <Bar dataKey="value" name="Volgers" fill="#10b981" radius={[4, 4, 0, 0]} maxBarSize={36} />
+                    </BarChart>
+                  </ResponsiveContainer>
+                ) : (
+                  <div className="flex h-full items-center justify-center text-xs text-slate-400">
+                    Geen verbonden kanalen.
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Top kanalen */}
+          {widgets.locations && (
+            <div className="bento-card">
+              <div className="mb-4 flex items-center justify-between">
+                <h3 className="text-sm font-bold text-slate-900 dark:text-white font-display">Top kanalen</h3>
+                <button onClick={() => onNavigate("integrations")} className="text-slate-300 hover:text-slate-500">
+                  <MoreHorizontal className="h-4 w-4" />
+                </button>
+              </div>
+              <div className="space-y-3.5">
+                {connectedSocials.length === 0 && (
+                  <div className="text-xs text-slate-400">Nog geen kanalen verbonden.</div>
+                )}
+                {connectedSocials.map((channel, idx) => {
+                  const Icon =
+                    channel.id === "linkedin" ? Linkedin :
+                    channel.id === "twitter" ? Twitter :
+                    channel.id === "facebook" ? Facebook : Instagram;
+                  const pct = Math.round((channel.followers / maxFollowers) * 100);
+                  return (
+                    <div key={channel.id} className="flex items-center gap-3">
+                      <span className="w-4 text-xs font-bold text-slate-400">{idx + 1}.</span>
+                      <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-slate-100 text-slate-600 dark:bg-white/5 dark:text-slate-300">
+                        <Icon className="h-3.5 w-3.5" />
+                      </span>
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center justify-between">
+                          <span className="truncate text-xs font-semibold text-slate-800 dark:text-slate-100">{channel.name}</span>
+                          <span className="text-[11px] font-bold text-slate-500 dark:text-slate-400">
+                            {channel.followers.toLocaleString("nl-NL")}
                           </span>
-                        ))}
+                        </div>
+                        <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-slate-100 dark:bg-white/5">
+                          <div className="h-full rounded-full bg-emerald-500" style={{ width: `${pct}%` }} />
+                        </div>
                       </div>
-                    ) : (
-                      <span className="text-slate-400 font-mono text-[10px]">Alleen website</span>
-                    )}
-                  </td>
-                  <td className="py-3">
-                    <span className={`font-bold font-mono ${
-                      post.seoScore >= 85 ? "text-emerald-500" :
-                      post.seoScore >= 70 ? "text-amber-500" : "text-rose-500"
-                    }`}>
-                      {post.seoScore ?? "N/A"}%
-                    </span>
-                  </td>
-                  <td className="py-3">
-                    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold leading-4 ${
-                      post.status === "published" 
-                        ? "bg-emerald-50 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-400" 
-                        : "bg-amber-50 dark:bg-amber-950/50 text-amber-700 dark:text-amber-400"
-                    }`}>
-                      {post.status === "published" ? "Gepubliceerd" : "Ingepland"}
-                    </span>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
         </div>
-      </div>
+      )}
     </div>
   );
 }

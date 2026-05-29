@@ -12,6 +12,12 @@ type Env = {
   // Vast basis-domein voor OAuth redirects, bv. https://publisher-dashboard.pages.dev
   // (geen per-deploy hash-subdomein gebruiken). Valt terug op de request-origin.
   APP_BASE_URL?: string;
+  // Inlogmuur: geheim om de sessie-cookie te ondertekenen (HMAC). Verplicht om in
+  // te kunnen loggen. Zet als Secret in Cloudflare, nooit committen.
+  SESSION_SECRET?: string;
+  // Komma-gescheiden allowlist van e-mailadressen die toegang krijgen tot het
+  // dashboard. Alleen accounts op deze lijst mogen na Google-login naar binnen.
+  ALLOWED_EMAILS?: string;
 };
 
 // Google OAuth constanten
@@ -25,6 +31,12 @@ const GOOGLE_OAUTH_SCOPES = [
   "https://www.googleapis.com/auth/webmasters.readonly",
 ].join(" ");
 const OAUTH_STATE_COOKIE = "g_oauth_state";
+// Onthoudt of de lopende OAuth-flow een volledige login (full-page) is of de
+// popup-koppeling vanuit "Sleutels & Integraties".
+const OAUTH_FLOW_COOKIE = "g_oauth_flow";
+// Ondertekende sessie-cookie van de inlogmuur.
+const SESSION_COOKIE = "pd_session";
+const SESSION_MAX_AGE = 60 * 60 * 24 * 30; // 30 dagen (in seconden)
 
 // Bepaalt het basis-domein voor de redirect_uri. Voorkeur: APP_BASE_URL env-var,
 // anders de origin van het inkomende request.
@@ -37,9 +49,119 @@ const getBaseUrl = (c: { env: Env; req: { url: string } }) => {
 const escapeHtml = (s: string) =>
   s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
+// ---------- inlogmuur: allowlist + ondertekende sessie ----------
+
+const textEncoder = new TextEncoder();
+
+// Allowlist uit env (komma-gescheiden), genormaliseerd naar lowercase.
+const allowedEmails = (env: Env): string[] =>
+  (env.ALLOWED_EMAILS || "")
+    .split(",")
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+
+const isAllowedEmail = (env: Env, email: string): boolean => {
+  const e = (email || "").trim().toLowerCase();
+  return !!e && allowedEmails(env).includes(e);
+};
+
+// base64url-helpers (Workers heeft geen Buffer; btoa/atob werken op binaire strings).
+const bytesToB64url = (bytes: ArrayBuffer | Uint8Array): string => {
+  const arr = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  let bin = "";
+  for (const b of arr) bin += String.fromCharCode(b);
+  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+};
+const strToB64url = (s: string): string => bytesToB64url(textEncoder.encode(s));
+const b64urlToStr = (s: string): string => {
+  const pad = s.length % 4 === 0 ? "" : "=".repeat(4 - (s.length % 4));
+  const b64 = s.replace(/-/g, "+").replace(/_/g, "/") + pad;
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new TextDecoder().decode(bytes);
+};
+
+const hmacKey = (secret: string) =>
+  crypto.subtle.importKey("raw", textEncoder.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, [
+    "sign",
+  ]);
+
+// Sessietoken: <payload>.<signature>, payload = base64url(JSON{ email, exp }).
+const signSessionToken = async (secret: string, email: string, exp: number): Promise<string> => {
+  const payload = strToB64url(JSON.stringify({ email, exp }));
+  const key = await hmacKey(secret);
+  const sig = await crypto.subtle.sign("HMAC", key, textEncoder.encode(payload));
+  return `${payload}.${bytesToB64url(sig)}`;
+};
+
+const verifySessionToken = async (
+  secret: string,
+  token: string
+): Promise<{ email: string; exp: number } | null> => {
+  const dot = token.lastIndexOf(".");
+  if (dot <= 0) return null;
+  const payload = token.slice(0, dot);
+  const sig = token.slice(dot + 1);
+  const key = await hmacKey(secret);
+  const expected = bytesToB64url(await crypto.subtle.sign("HMAC", key, textEncoder.encode(payload)));
+  if (expected !== sig) return null;
+  try {
+    const data = JSON.parse(b64urlToStr(payload)) as { email?: string; exp?: number };
+    if (!data.email || !data.exp || Date.now() > data.exp) return null;
+    return { email: data.email, exp: data.exp };
+  } catch {
+    return null;
+  }
+};
+
+// Leest de huidige geldige sessie uit de cookie (of null). Controleert ook of de
+// e-mail nog op de allowlist staat, zodat verwijderen uit de lijst direct werkt.
+const getSession = async (c: {
+  env: Env;
+  req: { url: string };
+  // hono-context bevat de cookie-helper via getCookie(c, ...)
+  [k: string]: unknown;
+}): Promise<{ email: string } | null> => {
+  const env = c.env;
+  if (!env.SESSION_SECRET) return null;
+  const token = getCookie(c as any, SESSION_COOKIE);
+  if (!token) return null;
+  const payload = await verifySessionToken(env.SESSION_SECRET, token);
+  if (!payload) return null;
+  if (!isAllowedEmail(env, payload.email)) return null;
+  return { email: payload.email };
+};
+
+const setSessionCookie = async (c: any, email: string, baseUrl: string): Promise<boolean> => {
+  if (!c.env.SESSION_SECRET) return false;
+  const exp = Date.now() + SESSION_MAX_AGE * 1000;
+  const token = await signSessionToken(c.env.SESSION_SECRET, email, exp);
+  setCookie(c, SESSION_COOKIE, token, {
+    httpOnly: true,
+    secure: baseUrl.startsWith("https://"),
+    sameSite: "Lax",
+    path: "/",
+    maxAge: SESSION_MAX_AGE,
+  });
+  return true;
+};
+
 type Variables = {};
 
 const app = new Hono<{ Bindings: Env; Variables: Variables }>();
+
+// ---------- inlogmuur: bescherm alle /api/* endpoints ----------
+// Alles onder /api/* vereist een geldige sessie, behalve /api/me (die rapporteert
+// juist of je ingelogd bent). De /auth/* routes blijven publiek: dat is de login
+// zelf. De statische SPA-shell bevat geen data of secrets; alle gegevens komen
+// uitsluitend via deze beveiligde endpoints.
+app.use("/api/*", async (c, next) => {
+  if (c.req.path === "/api/me") return next();
+  const session = await getSession(c as any);
+  if (!session) return c.json({ error: "unauthorized" }, 401);
+  return next();
+});
 
 // ---------- helpers ----------
 
@@ -152,6 +274,14 @@ const computeReadTime = (content: string) =>
   Math.max(1, Math.ceil(content.split(/\s+/).filter(Boolean).length / 200));
 
 // ---------- routes ----------
+
+// Sessiestatus voor de frontend-inlogmuur. Publiek bereikbaar (geen 401), zodat de
+// app kan bepalen of het loginscherm of het dashboard getoond moet worden.
+app.get("/api/me", async (c) => {
+  const session = await getSession(c as any);
+  if (session) return c.json({ authenticated: true, email: session.email });
+  return c.json({ authenticated: false });
+});
 
 app.get("/api/data", async (c) => {
   const db = c.env.DB;
@@ -433,7 +563,8 @@ const oauthSetupNeededPage = (redirectUri: string) => `<!DOCTYPE html>
     <ol>
       <li>Maak in Google Cloud Console een OAuth client (type: Web).</li>
       <li>Voeg deze redirect-URI exact toe:<br><code>${escapeHtml(redirectUri)}</code></li>
-      <li>Zet in Cloudflare Pages de secrets <code>GOOGLE_CLIENT_ID</code> en <code>GOOGLE_CLIENT_SECRET</code>.</li>
+      <li>Zet in Cloudflare Pages de secrets <code>GOOGLE_CLIENT_ID</code>, <code>GOOGLE_CLIENT_SECRET</code> en <code>SESSION_SECRET</code> (voor de inlogmuur).</li>
+      <li>Zet <code>ALLOWED_EMAILS</code> (komma-gescheiden) met de toegestane accounts.</li>
       <li>Optioneel: zet <code>APP_BASE_URL</code> op je vaste domein.</li>
     </ol>
     <button onclick="window.close()">Venster sluiten</button>
@@ -441,14 +572,57 @@ const oauthSetupNeededPage = (redirectUri: string) => `<!DOCTYPE html>
 </body>
 </html>`;
 
+// Volledig-scherm pagina: ingelogd Google-account staat niet op de allowlist.
+const accessDeniedPage = (email: string) => `<!DOCTYPE html>
+<html lang="nl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Geen toegang</title>
+  <style>
+    body { background:#0f172a; color:#f1f5f9; font-family: system-ui, -apple-system, sans-serif; display:flex; align-items:center; justify-content:center; min-height:100vh; margin:0; padding:1rem; }
+    .card { max-width:440px; width:100%; background:#1e293b; border:1px solid #334155; border-radius:1rem; padding:1.75rem; box-shadow:0 10px 40px rgba(0,0,0,.4); text-align:center; }
+    h2 { font-size:1.05rem; margin:0 0 .5rem; color:#f87171; }
+    p { font-size:.82rem; color:#94a3b8; line-height:1.55; }
+    code { background:#0f172a; border:1px solid #334155; border-radius:.3rem; padding:.05rem .35rem; font-size:.78rem; }
+    a { display:inline-block; margin-top:1.25rem; padding:.6rem 1rem; border-radius:.6rem; background:#334155; color:#e2e8f0; font-size:.8rem; font-weight:600; text-decoration:none; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h2>Geen toegang</h2>
+    <p>${email ? `Het account <code>${escapeHtml(email)}</code> staat niet op de toegangslijst van dit dashboard.` : "Dit account staat niet op de toegangslijst van dit dashboard."}</p>
+    <p>Log in met een toegestaan account, of vraag de beheerder om je e-mailadres toe te voegen.</p>
+    <a href="/auth/logout">Opnieuw proberen met een ander account</a>
+  </div>
+</body>
+</html>`;
+
+// Logout: sessie wissen en terug naar het loginscherm.
+app.get("/auth/logout", (c) => {
+  deleteCookie(c, SESSION_COOKIE, { path: "/" });
+  return c.redirect("/");
+});
+
 // Stap 1: redirect de gebruiker naar de Google consent screen.
 app.get("/auth/google", (c) => {
   const baseUrl = getBaseUrl(c);
   const redirectUri = `${baseUrl}/auth/google/callback`;
 
-  if (!c.env.GOOGLE_CLIENT_ID || !c.env.GOOGLE_CLIENT_SECRET) {
+  if (!c.env.GOOGLE_CLIENT_ID || !c.env.GOOGLE_CLIENT_SECRET || !c.env.SESSION_SECRET) {
     return c.html(oauthSetupNeededPage(redirectUri));
   }
+
+  // ?flow=login = volledige inlog (full-page redirect terug naar het dashboard);
+  // anders = popup-koppeling vanuit "Sleutels & Integraties".
+  const isLogin = new URL(c.req.url).searchParams.get("flow") === "login";
+  setCookie(c, OAUTH_FLOW_COOKIE, isLogin ? "login" : "popup", {
+    httpOnly: true,
+    secure: baseUrl.startsWith("https://"),
+    sameSite: "Lax",
+    path: "/",
+    maxAge: 600,
+  });
 
   // CSRF-bescherming: random state in een HttpOnly cookie, terug te vergelijken
   // in de callback.
@@ -484,9 +658,11 @@ app.get("/auth/google/callback", async (c) => {
   const code = url.searchParams.get("code");
   const state = url.searchParams.get("state");
   const cookieState = getCookie(c, OAUTH_STATE_COOKIE);
+  const isLogin = getCookie(c, OAUTH_FLOW_COOKIE) === "login";
 
-  // State-cookie is eenmalig - altijd opruimen.
+  // State- en flow-cookies zijn eenmalig - altijd opruimen.
   deleteCookie(c, OAUTH_STATE_COOKIE, { path: "/" });
+  deleteCookie(c, OAUTH_FLOW_COOKIE, { path: "/" });
 
   if (error) {
     return c.html(oauthResultPage({ baseUrl, ok: false, title: "Koppeling geannuleerd", message: `Google gaf terug: ${error}` }));
@@ -494,7 +670,7 @@ app.get("/auth/google/callback", async (c) => {
   if (!code || !state || !cookieState || state !== cookieState) {
     return c.html(oauthResultPage({ baseUrl, ok: false, title: "Koppeling mislukt", message: "Ongeldige of verlopen sessie (state-controle). Probeer opnieuw." }));
   }
-  if (!c.env.GOOGLE_CLIENT_ID || !c.env.GOOGLE_CLIENT_SECRET) {
+  if (!c.env.GOOGLE_CLIENT_ID || !c.env.GOOGLE_CLIENT_SECRET || !c.env.SESSION_SECRET) {
     return c.html(oauthSetupNeededPage(redirectUri));
   }
 
@@ -538,6 +714,22 @@ app.get("/auth/google/callback", async (c) => {
       console.error("Userinfo fetch failed:", e);
     }
 
+    // Inlogmuur: alleen accounts op de allowlist mogen naar binnen. Bij weigering
+    // geen tokens opslaan en geen sessie zetten.
+    if (!isAllowedEmail(c.env, email)) {
+      if (isLogin) return c.html(accessDeniedPage(email));
+      return c.html(
+        oauthResultPage({
+          baseUrl,
+          ok: false,
+          title: "Geen toegang",
+          message: email
+            ? `${email} staat niet op de toegangslijst van dit dashboard.`
+            : "Dit account staat niet op de toegangslijst van dit dashboard.",
+        })
+      );
+    }
+
     const expiry = Date.now() + (token.expires_in ?? 3600) * 1000;
 
     // Bestaande refresh token behouden als Google er deze keer geen meegeeft
@@ -557,6 +749,12 @@ app.get("/auth/google/callback", async (c) => {
     )
       .bind(token.access_token, refreshToken, expiry, email)
       .run();
+
+    // Inlogmuur: zet de ondertekende sessie-cookie (30 dagen).
+    await setSessionCookie(c, email, baseUrl);
+
+    // Volledige login -> terug naar het dashboard. Popup-koppeling -> sluit zichzelf.
+    if (isLogin) return c.redirect("/");
 
     return c.html(
       oauthResultPage({
@@ -662,6 +860,50 @@ Geen markdown, geen andere tekst.`;
   } catch (err) {
     console.error("Gemini optimization error:", err);
     return c.json({ error: "Gemini kon de content niet optimaliseren. Probeer het later opnieuw." }, 500);
+  }
+});
+
+// Algemene "Ask AI" chat-endpoint voor de dashboard-assistent.
+app.post("/api/gemini/ask", async (c) => {
+  const { question, context } = await c.req.json<{
+    question?: string;
+    context?: string;
+  }>();
+
+  if (!question || !question.trim()) {
+    return c.json({ error: "Stel een vraag." }, 400);
+  }
+
+  const apiKey = c.env.GEMINI_API_KEY;
+
+  if (!apiKey) {
+    return c.json({
+      answer:
+        "De AI-assistent is nog niet geconfigureerd (geen GEMINI_API_KEY ingesteld). " +
+        "Voeg een Gemini API-sleutel toe bij Integraties om live antwoorden te krijgen. " +
+        "Tip: gebruik de Planner-tab om met AI SEO-titels en social previews te genereren.",
+      fallback: true,
+    });
+  }
+
+  try {
+    const ai = new GoogleGenAI({ apiKey });
+    const prompt = `Je bent de ingebouwde AI-assistent van het WebPublish publisher-dashboard.
+Je helpt de gebruiker met content publiceren, SEO, social media planning en het interpreteren van analytics.
+Antwoord beknopt en praktisch in het Nederlands (tenzij de gebruiker een andere taal gebruikt).
+${context ? `\nContext over het dashboard:\n${context}\n` : ""}
+Vraag van de gebruiker:
+"${question}"`;
+
+    const response = await ai.models.generateContent({
+      model: "gemini-2.5-flash",
+      contents: prompt,
+    });
+
+    return c.json({ answer: (response.text || "").trim() || "Ik kon geen antwoord genereren." });
+  } catch (err) {
+    console.error("Gemini ask error:", err);
+    return c.json({ error: "De AI-assistent is tijdelijk niet beschikbaar. Probeer het later opnieuw." }, 500);
   }
 });
 
