@@ -6,5 +6,5 @@ pages_build_output_dir = "dist"
 [[d1_databases]]
 binding = "DB"
 database_name = "publisher-dashboard-db"
-database_id = "REPLACE_AFTER_RUNNING_npm_run_db:create"
+database_id = "f9bae933-c694-4c43-a425-4dd6bde62c62"
 migrations_dir = "migrations"
